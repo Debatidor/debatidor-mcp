@@ -18,6 +18,4 @@ Añadir al archivo `mcp_config.json`:
     }
   }
 }
-```
 
-Para documentación de herramientas y esquemas, consultar [debatidor-docs](https://github.com/LeoPro23/debatidor-docs).
