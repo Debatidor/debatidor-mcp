@@ -51,14 +51,18 @@ test('public bootstrap exposes ping but not user-data tools', async () => {
   });
 });
 
-test('legacy private bridge can expose Lead status', async () => {
+test('authenticated bridge exposes Lead status', async () => {
   const upstream: typeof fetch = async () =>
     jsonResponse([
       { id: 'deb_lead', title: 'Lead room', mode: 'LEAD', status: 'RUNNING', currentRound: 2, roundsLimit: 5 },
       { id: 'deb_rr', title: 'Round robin', mode: 'ROUND_ROBIN', status: 'RUNNING' },
     ]);
 
-  const api = new DebatidorApiClient('https://api.test', 'deb_live_test', upstream);
+  const api = new DebatidorApiClient(
+    'https://api.test',
+    { type: 'api-key', token: 'deb_live_test' },
+    upstream,
+  );
   await withClient(api, async (client) => {
     const tools = await client.listTools();
     assert.ok(tools.tools.some((tool) => tool.name === 'debatidor_ping'));
@@ -90,7 +94,11 @@ test('specific Lead status validates workspace ownership before snapshot lookup'
     return jsonResponse({ found: true, debate: { id: 'other', mode: 'LEAD', status: 'RUNNING' } });
   };
 
-  const api = new DebatidorApiClient('https://api.test', 'deb_live_test', upstream);
+  const api = new DebatidorApiClient(
+    'https://api.test',
+    { type: 'bearer', token: 'oauth_test' },
+    upstream,
+  );
   await assert.rejects(() => api.getLeadStatus('other'), /lead_debate_not_found/);
   assert.equal(calls.length, 1);
 });
