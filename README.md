@@ -1,42 +1,61 @@
 # @debatidor/mcp
 
-Servidor oficial de **Model Context Protocol (MCP)** para Debatidor.
+Servidor remoto oficial de **Model Context Protocol (MCP)** para Debatidor.
 
-El objetivo es exponer Arena, Lead y memoria de Debatidor a clientes compatibles con MCP sin duplicar lógica de negocio. `debatidor-mcp` es un adaptador fino; la autoridad de identidad, permisos y datos permanece en `debatidor-back`.
+`debatidor-mcp` es un adaptador fino entre clientes MCP (ChatGPT, Claude, Gemini, IDEs y agentes compatibles) y `debatidor-back`. La autoridad de identidad, permisos, Arena, Lead y datos permanece en el backend.
+
+## Arquitectura
+
+```text
+ChatGPT / Claude / Gemini / IDEs
+              |
+        Streamable HTTP
+              |
+   https://mcp.debatidor.com/mcp
+              |
+        debatidor-mcp
+              |
+        debatidor-back
+```
+
+El endpoint remoto es el camino principal. `stdio` se conserva únicamente para clientes locales/IDE y debugging.
 
 ## Estado actual
 
-Primera vertical de P7:
+Versión `0.2.0`:
 
-- MCP TypeScript SDK v2 (`2026-07-28`).
-- Streamable HTTP en `POST /mcp`.
-- Transporte stdio para clientes locales.
-- Tool read-only `debatidor_get_lead_status`.
-- Cliente HTTP contra `debatidor-back` usando `DEBATIDOR_API_KEY` solo como puente de dogfooding.
-- El servidor HTTP **solo permite loopback** por ahora. No se debe publicar directamente hasta implementar OAuth MCP.
+- MCP TypeScript SDK v2, compatible con la revisión `2026-07-28`.
+- Streamable HTTP en `/mcp`.
+- servidor Docker listo para despliegue continuo en Easypanel;
+- healthcheck HTTP en `/health` y `/healthz`;
+- `debatidor_ping` siempre disponible y sin datos de usuario;
+- `debatidor_get_lead_status` sigue disponible solo mediante el bridge privado/legacy con API key;
+- el endpoint público **no habilita tools de datos de usuario hasta implementar OAuth 2.1 MCP**.
 
-## Requisitos
+Esta separación permite desplegar y conectar el MCP remoto desde el inicio sin exponer una API key server-side ni datos de un workspace a usuarios anónimos.
 
-- Node.js 22+
-- Una API key de Debatidor para el entorno de desarrollo
+## Desarrollo local
 
 ```bash
-cp .env.example .env
 npm install
 npm run check
 npm test
+npm run build
+npm run dev:http
 ```
 
-## HTTP local
-
-```bash
-DEBATIDOR_API_KEY=deb_live_xxx npm run dev:http
-```
-
-Endpoint:
+Por defecto escucha en:
 
 ```text
-http://127.0.0.1:3000/mcp
+http://0.0.0.0:3002
+```
+
+Para desarrollo local puede usarse:
+
+```bash
+DEBATIDOR_MCP_HOST=127.0.0.1 \
+DEBATIDOR_MCP_PUBLIC_BASE_URL=http://127.0.0.1:3002 \
+npm run dev:http
 ```
 
 Inspector:
@@ -45,56 +64,72 @@ Inspector:
 npx @modelcontextprotocol/inspector@latest
 ```
 
-Selecciona **Streamable HTTP** y usa `http://127.0.0.1:3000/mcp`.
+Selecciona **Streamable HTTP** y apunta a `http://127.0.0.1:3002/mcp`.
 
-## stdio
+## Endpoint remoto de producción
 
-```bash
-DEBATIDOR_API_KEY=deb_live_xxx npm run dev:stdio
+Objetivo canónico:
+
+```text
+https://mcp.debatidor.com/mcp
 ```
 
-Tras publicar el paquete, clientes locales podrán lanzar:
+El servicio se despliega como contenedor independiente detrás de Traefik/Easypanel. Variables mínimas:
 
-```json
-{
-  "mcpServers": {
-    "debatidor": {
-      "command": "npx",
-      "args": ["-y", "@debatidor/mcp"],
-      "env": {
-        "DEBATIDOR_API_KEY": "<TU_API_KEY>"
-      }
-    }
-  }
-}
+```env
+NODE_ENV=production
+DEBATIDOR_MCP_HOST=0.0.0.0
+DEBATIDOR_MCP_PORT=3002
+DEBATIDOR_MCP_PUBLIC_BASE_URL=https://mcp.debatidor.com
+DEBATIDOR_MCP_ALLOWED_HOSTS=mcp.debatidor.com
+DEBATIDOR_MCP_ENABLE_LEGACY_API_KEY_BRIDGE=false
 ```
 
-## Tool inicial
+No se necesita `DEBATIDOR_API_KEY` para el bootstrap público.
 
-### `debatidor_get_lead_status`
+### Tool pública de bootstrap
 
-Devuelve las Arenas en modo `LEAD` visibles en el workspace autenticado. Con `debateId` devuelve además los participantes del debate.
+`debatidor_ping` sirve para validar discovery, selección y tool calls reales desde un host remoto sin tocar datos privados.
 
-La implementación valida primero que el debate aparezca en `GET /realtime/debates` para el workspace antes de consultar el snapshot. Esto evita exponer por MCP un `debateId` ajeno mientras el endpoint legacy de snapshot termina de endurecer ownership en backend.
+### Tools autenticadas
+
+`debatidor_get_lead_status` se registra únicamente cuando se habilita explícitamente:
+
+```env
+DEBATIDOR_MCP_ENABLE_LEGACY_API_KEY_BRIDGE=true
+DEBATIDOR_API_KEY=deb_live_xxx
+```
+
+Ese modo es **solo para redes locales/privadas y dogfooding temporal**. No debe habilitarse en `mcp.debatidor.com`.
+
+La siguiente fase implementa OAuth 2.1 MCP (Protected Resource Metadata + Authorization Code + PKCE S256, priorizando CIMD y conservando DCR donde sea necesario). Después de eso las tools de Lead, Arena y memoria podrán exponerse de forma user-scoped en el endpoint remoto.
 
 ## ChatGPT, Claude y Gemini
 
-El core no contiene adaptadores por proveedor: habla MCP estándar. La misma implementación de tools debe funcionar en cualquier cliente que soporte el transporte y la revisión negociada.
+El core no contiene adaptadores específicos por proveedor. Todos consumen el mismo endpoint MCP estándar:
 
-Para el primer dogfood con ChatGPT se recomienda mantener el proceso en loopback y usar **Secure MCP Tunnel** en Developer mode. No expongas este build a Internet: todavía usa una API key server-side y no implementa autorización OAuth por usuario.
+```text
+https://mcp.debatidor.com/mcp
+```
 
-La siguiente fase de P7 implementará autorización MCP/OAuth 2.1 con PKCE y Protected Resource Metadata. Para interoperabilidad durante la transición del ecosistema, el diseño deberá priorizar **Client ID Metadata Documents (CIMD)** y conservar **Dynamic Client Registration (DCR)** como fallback mientras clientes como Gemini/otros aún lo utilicen.
+- ChatGPT: conexión MCP/Plugin en Developer mode.
+- Claude: Custom Connector por remote MCP.
+- Gemini/otros hosts compatibles: custom MCP endpoint según disponibilidad del producto.
 
-Con OAuth listo, el mismo endpoint remoto `/mcp` será el objetivo para:
+## stdio
 
-- ChatGPT Plugins / MCP connections.
-- Claude custom connectors por remote MCP.
-- Gemini Spark custom Connected Apps.
-- otros hosts MCP como VS Code, Cursor y clientes compatibles.
+Se mantiene para clientes locales:
+
+```bash
+DEBATIDOR_MCP_HOST=127.0.0.1 \
+DEBATIDOR_MCP_PUBLIC_BASE_URL=http://127.0.0.1:3002 \
+npm run dev:stdio
+```
 
 ## Seguridad
 
-- No loguear `DEBATIDOR_API_KEY` ni resultados sensibles completos.
-- No permitir bind público sin OAuth.
-- Toda tool que acepte un `debateId` debe validar ownership por workspace antes de leer o mutar datos.
-- Las futuras tools de escritura deben declarar annotations MCP correctas y conservar aprobación del cliente/usuario cuando aplique.
+- El endpoint público no lleva una API key de usuario embebida.
+- Las tools con datos de usuario permanecerán deshabilitadas hasta OAuth.
+- Toda tool que acepte identificadores debe validar ownership/tenant en backend.
+- Las futuras tools de escritura deben declarar annotations MCP correctas y respetar autorización/confirmación.
+- No loguear tokens, API keys ni cuerpos sensibles completos.
