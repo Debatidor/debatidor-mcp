@@ -24,6 +24,10 @@ export type LeadStatus = {
   participants?: ParticipantSummary[];
 };
 
+export type DebatidorApiAuth =
+  | { type: 'api-key'; token: string }
+  | { type: 'bearer'; token: string };
+
 export class DebatidorApiError extends Error {
   constructor(
     message: string,
@@ -38,9 +42,13 @@ export class DebatidorApiError extends Error {
 export class DebatidorApiClient {
   constructor(
     private readonly baseUrl: string,
-    private readonly apiKey: string,
+    private readonly auth: DebatidorApiAuth,
     private readonly fetchImpl: typeof fetch = fetch,
   ) {}
+
+  async validateAccessToken(): Promise<void> {
+    await this.request('/auth/me');
+  }
 
   async getLeadStatus(debateId?: string): Promise<LeadStatus> {
     const debates = await this.listDebates();
@@ -54,9 +62,6 @@ export class DebatidorApiClient {
       };
     }
 
-    // Important: validate ownership through the workspace-scoped list endpoint
-    // before calling the legacy snapshot route, whose controller does not yet
-    // enforce workspace ownership by itself.
     const selected = leadDebates.find((debate) => debate.id === debateId);
     if (!selected) {
       throw new DebatidorApiError('lead_debate_not_found', 404, 'lead_debate_not_found');
@@ -85,13 +90,12 @@ export class DebatidorApiClient {
     return Array.isArray(result) ? (result as DebateSummary[]) : [];
   }
 
-  private async request<T>(path: string): Promise<T> {
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      headers: {
-        accept: 'application/json',
-        'x-api-key': this.apiKey,
-      },
-    });
+  private async request<T = unknown>(path: string): Promise<T> {
+    const headers: Record<string, string> = { accept: 'application/json' };
+    if (this.auth.type === 'api-key') headers['x-api-key'] = this.auth.token;
+    else headers.authorization = `Bearer ${this.auth.token}`;
+
+    const response = await this.fetchImpl(`${this.baseUrl}${path}`, { headers });
 
     if (!response.ok) {
       let code: string | undefined;
