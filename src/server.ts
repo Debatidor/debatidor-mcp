@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { DebatidorApiClient, DebatidorApiError, type LeadStatus } from './debatidor-api.js';
 
-export const SERVER_VERSION = '0.2.0';
+export const SERVER_VERSION = '0.3.0';
 export const PROTOCOL_VERSION = '2026-07-28';
 
 export type DebatidorServerOptions = {
@@ -56,7 +56,7 @@ export function createDebatidorServer(options: DebatidorServerOptions): McpServe
     {
       title: 'Check Debatidor MCP',
       description:
-        'Check that the official Debatidor MCP server is reachable and report its protocol/version. This bootstrap tool never returns user data and can be used before account linking is configured.',
+        'Check that the official Debatidor MCP server is reachable and report its protocol/version.',
       inputSchema: z.object({}),
       outputSchema: pingSchema,
       annotations: {
@@ -79,7 +79,7 @@ export function createDebatidorServer(options: DebatidorServerOptions): McpServe
         content: [
           {
             type: 'text',
-            text: `Debatidor MCP ${SERVER_VERSION} is online (${PROTOCOL_VERSION}). Authenticated tools: ${status.authenticatedToolsEnabled ? 'enabled' : 'not enabled yet'}.`,
+            text: `Debatidor MCP ${SERVER_VERSION} is online (${PROTOCOL_VERSION}). Authenticated tools: ${status.authenticatedToolsEnabled ? 'enabled' : 'not enabled'}.`,
           },
         ],
         structuredContent: status,
@@ -87,9 +87,6 @@ export function createDebatidorServer(options: DebatidorServerOptions): McpServe
     },
   );
 
-  // Temporary compatibility bridge for local/private dogfooding only.
-  // Public production deployments must leave this disabled until OAuth 2.1
-  // establishes the user principal for each MCP request.
   if (options.api) {
     registerLeadStatusTool(server, options.api);
   }
@@ -103,7 +100,7 @@ function registerLeadStatusTool(server: McpServer, api: DebatidorApiClient) {
     {
       title: 'Get Debatidor Lead status',
       description:
-        'Read the current status of Debatidor LEAD-mode arenas in the authenticated workspace. Optionally inspect one LEAD debate by id. Use this before asking the Lead to continue or when the user asks what Debatidor is doing.',
+        'Read the current status of Debatidor LEAD-mode arenas in the authenticated workspace. Optionally inspect one LEAD debate by id.',
       inputSchema: z.object({
         debateId: z
           .string()
@@ -163,7 +160,7 @@ function formatLeadStatus(status: LeadStatus): string {
 function formatSafeError(error: unknown): string {
   if (error instanceof DebatidorApiError) {
     if (error.status === 401 || error.status === 403) {
-      return 'Debatidor rejected the configured credentials. Reconnect or replace the API key used by the MCP bridge.';
+      return 'The Debatidor account link is no longer authorized. Reconnect the MCP app.';
     }
     if (error.code === 'lead_debate_not_found') {
       return 'That LEAD debate is not available in the authenticated Debatidor workspace.';

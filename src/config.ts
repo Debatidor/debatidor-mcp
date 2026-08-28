@@ -6,6 +6,8 @@ export type McpRuntimeConfig = {
   publicBaseUrl: string;
   allowedHosts: string[];
   legacyApiKeyBridgeEnabled: boolean;
+  oauthEnabled: boolean;
+  authorizationServer: string;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): McpRuntimeConfig {
@@ -32,10 +34,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): McpRuntimeConf
     throw new Error('DEBATIDOR_MCP_PUBLIC_BASE_URL must use http or https');
   }
 
+  const oauthEnabled = parseBooleanWithDefault(
+    env.DEBATIDOR_MCP_OAUTH_ENABLED,
+    publicUrl.protocol === 'https:',
+  );
+  const authorizationServer = String(
+    env.DEBATIDOR_MCP_AUTHORIZATION_SERVER ?? apiBaseUrl,
+  ).replace(/\/$/, '');
+
   if (legacyApiKeyBridgeEnabled && !apiKey) {
     throw new Error(
       'DEBATIDOR_API_KEY is required when DEBATIDOR_MCP_ENABLE_LEGACY_API_KEY_BRIDGE=true',
     );
+  }
+  if (legacyApiKeyBridgeEnabled && oauthEnabled) {
+    throw new Error('OAuth and the legacy API-key bridge cannot be enabled together');
   }
 
   const configuredHosts = String(env.DEBATIDOR_MCP_ALLOWED_HOSTS ?? '')
@@ -58,6 +71,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): McpRuntimeConf
     publicBaseUrl,
     allowedHosts,
     legacyApiKeyBridgeEnabled,
+    oauthEnabled,
+    authorizationServer,
   };
 }
 
@@ -82,4 +97,9 @@ function isLoopbackUrl(url: URL): boolean {
 
 function parseBoolean(value: string | undefined): boolean {
   return ['1', 'true', 'yes', 'on'].includes(String(value ?? '').trim().toLowerCase());
+}
+
+function parseBooleanWithDefault(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value === null || String(value).trim() === '') return fallback;
+  return parseBoolean(value);
 }
