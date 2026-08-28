@@ -1,10 +1,10 @@
 {
   "name": "@debatidor/mcp",
-  "version": "0.1.0",
-  "description": "Servidor MCP oficial de Debatidor para conectar ChatGPT, Claude, Gemini y otros clientes compatibles.",
+  "version": "0.2.0",
+  "description": "Servidor MCP remoto oficial de Debatidor para ChatGPT, Claude, Gemini y otros clientes compatibles.",
   "type": "module",
   "bin": {
-    "debatidor-mcp": "./dist/stdio.js"
+    "debatidor-mcp": "./dist/src/stdio.js"
   },
   "files": [
     "dist",
@@ -15,9 +15,9 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "dev:http": "tsx src/http.ts",
     "dev:stdio": "tsx src/stdio.ts",
-    "start": "node dist/http.js",
-    "start:http": "node dist/http.js",
-    "start:stdio": "node dist/stdio.js",
+    "start": "node dist/src/http.js",
+    "start:http": "node dist/src/http.js",
+    "start:stdio": "node dist/src/stdio.js",
     "test": "tsx --test test/*.test.ts",
     "inspect": "npx @modelcontextprotocol/inspector@latest"
   },

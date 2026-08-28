@@ -2,6 +2,14 @@ import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { DebatidorApiClient, DebatidorApiError, type LeadStatus } from './debatidor-api.js';
 
+export const SERVER_VERSION = '0.2.0';
+export const PROTOCOL_VERSION = '2026-07-28';
+
+export type DebatidorServerOptions = {
+  api?: DebatidorApiClient;
+  publicBaseUrl: string;
+};
+
 const participantSchema = z.object({
   id: z.string().optional(),
   connectionId: z.string().optional(),
@@ -28,12 +36,68 @@ const leadStatusSchema = z.object({
   participants: z.array(participantSchema).optional(),
 });
 
-export function createDebatidorServer(api: DebatidorApiClient): McpServer {
+const pingSchema = z.object({
+  ok: z.literal(true),
+  service: z.literal('debatidor-mcp'),
+  version: z.string(),
+  protocol: z.string(),
+  endpoint: z.string(),
+  authenticatedToolsEnabled: z.boolean(),
+});
+
+export function createDebatidorServer(options: DebatidorServerOptions): McpServer {
   const server = new McpServer({
     name: 'debatidor',
-    version: '0.1.0',
+    version: SERVER_VERSION,
   });
 
+  server.registerTool(
+    'debatidor_ping',
+    {
+      title: 'Check Debatidor MCP',
+      description:
+        'Check that the official Debatidor MCP server is reachable and report its protocol/version. This bootstrap tool never returns user data and can be used before account linking is configured.',
+      inputSchema: z.object({}),
+      outputSchema: pingSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      const status = {
+        ok: true as const,
+        service: 'debatidor-mcp' as const,
+        version: SERVER_VERSION,
+        protocol: PROTOCOL_VERSION,
+        endpoint: `${options.publicBaseUrl}/mcp`,
+        authenticatedToolsEnabled: Boolean(options.api),
+      };
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Debatidor MCP ${SERVER_VERSION} is online (${PROTOCOL_VERSION}). Authenticated tools: ${status.authenticatedToolsEnabled ? 'enabled' : 'not enabled yet'}.`,
+          },
+        ],
+        structuredContent: status,
+      };
+    },
+  );
+
+  // Temporary compatibility bridge for local/private dogfooding only.
+  // Public production deployments must leave this disabled until OAuth 2.1
+  // establishes the user principal for each MCP request.
+  if (options.api) {
+    registerLeadStatusTool(server, options.api);
+  }
+
+  return server;
+}
+
+function registerLeadStatusTool(server: McpServer, api: DebatidorApiClient) {
   server.registerTool(
     'debatidor_get_lead_status',
     {
@@ -70,8 +134,6 @@ export function createDebatidorServer(api: DebatidorApiClient): McpServer {
       }
     },
   );
-
-  return server;
 }
 
 function formatLeadStatus(status: LeadStatus): string {

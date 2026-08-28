@@ -5,6 +5,9 @@ import { DebatidorApiClient } from './debatidor-api.js';
 import { createDebatidorServer } from './server.js';
 
 const config = loadConfig();
-const api = new DebatidorApiClient(config.apiBaseUrl, config.apiKey);
+const api =
+  config.legacyApiKeyBridgeEnabled && config.apiKey
+    ? new DebatidorApiClient(config.apiBaseUrl, config.apiKey)
+    : undefined;
 
-void serveStdio(() => createDebatidorServer(api));
+void serveStdio(() => createDebatidorServer({ api, publicBaseUrl: config.publicBaseUrl }));

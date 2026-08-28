@@ -1,31 +1,85 @@
 export type McpRuntimeConfig = {
   apiBaseUrl: string;
-  apiKey: string;
+  apiKey?: string;
   host: string;
   port: number;
+  publicBaseUrl: string;
+  allowedHosts: string[];
+  legacyApiKeyBridgeEnabled: boolean;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): McpRuntimeConfig {
+  const host = String(env.DEBATIDOR_MCP_HOST ?? '0.0.0.0').trim();
+  const port = Number(env.DEBATIDOR_MCP_PORT ?? 3002);
+  const publicBaseUrl = String(
+    env.DEBATIDOR_MCP_PUBLIC_BASE_URL ?? `http://127.0.0.1:${port}`,
+  ).replace(/\/$/, '');
   const apiBaseUrl = String(env.DEBATIDOR_API_BASE_URL ?? 'https://api.debatidor.com').replace(/\/$/, '');
-  const apiKey = String(env.DEBATIDOR_API_KEY ?? '').trim();
-  const host = String(env.DEBATIDOR_MCP_HOST ?? '127.0.0.1').trim();
-  const port = Number(env.DEBATIDOR_MCP_PORT ?? 3000);
+  const apiKey = String(env.DEBATIDOR_API_KEY ?? '').trim() || undefined;
+  const legacyApiKeyBridgeEnabled = parseBoolean(env.DEBATIDOR_MCP_ENABLE_LEGACY_API_KEY_BRIDGE);
 
-  if (!apiKey) {
-    throw new Error('DEBATIDOR_API_KEY is required for the current dogfood auth bridge');
-  }
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error('DEBATIDOR_MCP_PORT must be a valid TCP port');
   }
-  if (!isLoopbackHost(host)) {
+
+  let publicUrl: URL;
+  try {
+    publicUrl = new URL(publicBaseUrl);
+  } catch {
+    throw new Error('DEBATIDOR_MCP_PUBLIC_BASE_URL must be an absolute http(s) URL');
+  }
+  if (publicUrl.protocol !== 'http:' && publicUrl.protocol !== 'https:') {
+    throw new Error('DEBATIDOR_MCP_PUBLIC_BASE_URL must use http or https');
+  }
+
+  if (legacyApiKeyBridgeEnabled && !apiKey) {
     throw new Error(
-      'Remote/public binding is disabled until MCP OAuth is implemented. Bind to 127.0.0.1 and use a trusted development tunnel instead.',
+      'DEBATIDOR_API_KEY is required when DEBATIDOR_MCP_ENABLE_LEGACY_API_KEY_BRIDGE=true',
     );
   }
 
-  return { apiBaseUrl, apiKey, host, port };
+  const configuredHosts = String(env.DEBATIDOR_MCP_ALLOWED_HOSTS ?? '')
+    .split(',')
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  const allowedHosts = Array.from(
+    new Set([
+      publicUrl.hostname.toLowerCase(),
+      ...configuredHosts,
+      ...(isLoopbackUrl(publicUrl) ? ['127.0.0.1', 'localhost', '::1'] : []),
+    ]),
+  );
+
+  return {
+    apiBaseUrl,
+    apiKey,
+    host,
+    port,
+    publicBaseUrl,
+    allowedHosts,
+    legacyApiKeyBridgeEnabled,
+  };
 }
 
-export function isLoopbackHost(host: string): boolean {
-  return host === '127.0.0.1' || host === '::1' || host === 'localhost';
+export function isAllowedHost(hostHeader: string | undefined, allowedHosts: string[]): boolean {
+  if (!hostHeader) return false;
+  const normalized = normalizeHost(hostHeader);
+  return allowedHosts.includes(normalized);
+}
+
+function normalizeHost(value: string): string {
+  const trimmed = value.trim().toLowerCase();
+  if (trimmed.startsWith('[')) {
+    const end = trimmed.indexOf(']');
+    return end >= 0 ? trimmed.slice(1, end) : trimmed;
+  }
+  return trimmed.split(':')[0] ?? trimmed;
+}
+
+function isLoopbackUrl(url: URL): boolean {
+  return url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]' || url.hostname === '::1';
+}
+
+function parseBoolean(value: string | undefined): boolean {
+  return ['1', 'true', 'yes', 'on'].includes(String(value ?? '').trim().toLowerCase());
 }

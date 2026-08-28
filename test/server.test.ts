@@ -12,15 +12,13 @@ function jsonResponse(value: unknown, status = 200): Response {
   });
 }
 
-test('debatidor_get_lead_status lists only LEAD arenas', async () => {
-  const upstream: typeof fetch = async () =>
-    jsonResponse([
-      { id: 'deb_lead', title: 'Lead room', mode: 'LEAD', status: 'RUNNING', currentRound: 2, roundsLimit: 5 },
-      { id: 'deb_rr', title: 'Round robin', mode: 'ROUND_ROBIN', status: 'RUNNING' },
-    ]);
-
-  const api = new DebatidorApiClient('https://api.test', 'deb_live_test', upstream);
-  const handler = createMcpHandler(() => createDebatidorServer(api));
+async function withClient(
+  api: DebatidorApiClient | undefined,
+  run: (client: Client) => Promise<void>,
+) {
+  const handler = createMcpHandler(() =>
+    createDebatidorServer({ api, publicBaseUrl: 'https://mcp.debatidor.test' }),
+  );
   const transport = new StreamableHTTPClientTransport(new URL('http://test.local/mcp'), {
     fetch: (url, init) => handler.fetch(new Request(url, init)),
   });
@@ -28,7 +26,42 @@ test('debatidor_get_lead_status lists only LEAD arenas', async () => {
 
   try {
     await client.connect(transport);
+    await run(client);
+  } finally {
+    await client.close();
+    await handler.close();
+  }
+}
+
+test('public bootstrap exposes ping but not user-data tools', async () => {
+  await withClient(undefined, async (client) => {
     const tools = await client.listTools();
+    assert.deepEqual(tools.tools.map((tool) => tool.name), ['debatidor_ping']);
+
+    const result = await client.callTool({ name: 'debatidor_ping', arguments: {} });
+    assert.equal(result.isError, undefined);
+    const structured = result.structuredContent as {
+      ok: boolean;
+      authenticatedToolsEnabled: boolean;
+      endpoint: string;
+    };
+    assert.equal(structured.ok, true);
+    assert.equal(structured.authenticatedToolsEnabled, false);
+    assert.equal(structured.endpoint, 'https://mcp.debatidor.test/mcp');
+  });
+});
+
+test('legacy private bridge can expose Lead status', async () => {
+  const upstream: typeof fetch = async () =>
+    jsonResponse([
+      { id: 'deb_lead', title: 'Lead room', mode: 'LEAD', status: 'RUNNING', currentRound: 2, roundsLimit: 5 },
+      { id: 'deb_rr', title: 'Round robin', mode: 'ROUND_ROBIN', status: 'RUNNING' },
+    ]);
+
+  const api = new DebatidorApiClient('https://api.test', 'deb_live_test', upstream);
+  await withClient(api, async (client) => {
+    const tools = await client.listTools();
+    assert.ok(tools.tools.some((tool) => tool.name === 'debatidor_ping'));
     assert.ok(tools.tools.some((tool) => tool.name === 'debatidor_get_lead_status'));
 
     const result = await client.callTool({
@@ -43,10 +76,7 @@ test('debatidor_get_lead_status lists only LEAD arenas', async () => {
     };
     assert.equal(structured.activeCount, 1);
     assert.deepEqual(structured.debates.map((debate) => debate.id), ['deb_lead']);
-  } finally {
-    await client.close();
-    await handler.close();
-  }
+  });
 });
 
 test('specific Lead status validates workspace ownership before snapshot lookup', async () => {
