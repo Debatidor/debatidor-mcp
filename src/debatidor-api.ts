@@ -72,6 +72,31 @@ export type QuickDebateResult = {
   connectionId: string | null;
 };
 
+export type AgentTool = 'fs.list' | 'fs.read' | 'fs.write' | 'shell.run';
+
+export type AgentExecutionInput = {
+  agentId?: string;
+  tool: AgentTool;
+  path?: string;
+  content?: string;
+  command?: string;
+  cwd?: string;
+  timeoutMs?: number;
+};
+
+export type AgentExecutionResult = {
+  tool: AgentTool;
+  agentId: string | null;
+  ok?: boolean;
+  path?: string;
+  bytes?: number;
+  content?: string;
+  entries?: string[];
+  error?: string;
+  output?: string;
+  exitCode?: number | null;
+};
+
 export type DebatidorApiAuth =
   | { type: 'api-key'; token: string }
   | { type: 'bearer'; token: string };
@@ -171,6 +196,13 @@ export class DebatidorApiClient {
         },
       },
     );
+  }
+
+  async executeAgent(input: AgentExecutionInput): Promise<AgentExecutionResult> {
+    return this.request<AgentExecutionResult>('/agent-execution/execute', {
+      method: 'POST',
+      body: input,
+    });
   }
 
   async listDebates(): Promise<DebateSummary[]> {
