@@ -24,7 +24,7 @@ El endpoint remoto es el camino principal. `stdio` se conserva únicamente para 
 
 ## Estado actual
 
-Versión `0.5.0`:
+Versión `0.6.0`:
 
 - MCP TypeScript SDK v2, compatible con la revisión `2026-07-28`;
 - Streamable HTTP stateless en `/mcp`;
@@ -35,9 +35,10 @@ Versión `0.5.0`:
 - `debatidor_get_lead_status` para Arenas `LEAD` del workspace autenticado;
 - `debatidor_search_context` para búsqueda semántica read-only;
 - `debatidor_index_context` para materializar explícitamente mensajes persistidos como memoria semántica;
+- `debatidor_quick_debate` para inyectar una intervención y delegar la ejecución al runtime existente de Arena;
 - bridge API-key legacy únicamente para dogfooding local/privado y mutuamente excluyente con OAuth.
 
-El bootstrap `0.2.0` fue validado desde ChatGPT real; `0.3.0` añadió account linking user-scoped; `0.4.0` incorporó búsqueda semántica y `0.5.0` separa explícitamente el coste/escritura de indexación de la consulta read-only.
+El bootstrap `0.2.0` fue validado desde ChatGPT real; `0.3.0` añadió account linking user-scoped; `0.4.0` incorporó búsqueda semántica; `0.5.0` separó explícitamente el coste/escritura de indexación de la consulta read-only; `0.6.0` añade la primera acción de orquestación sin reimplementar el runtime en MCP.
 
 ## Desarrollo local
 
@@ -133,9 +134,18 @@ Materializa hasta 50 mensajes persistidos de una Arena como recuerdos `MESSAGE`.
 
 El uso de embeddings puede generar consumo/coste en la cuenta del proveedor configurada por el usuario.
 
-Siguiente tool de P7:
+### `debatidor_quick_debate`
 
-- `debatidor_quick_debate`
+Inyecta una intervención en una Arena **ya existente** y delega el trabajo al mismo runtime que usa el canal web/CLI. No crea un segundo orquestador dentro de MCP.
+
+Inputs principales:
+
+- `debateId`: Arena del workspace autenticado;
+- `prompt`: intervención que se persiste como mensaje humano;
+- `mode`: `web`, `api` o `both` (default `both`);
+- `connectionId`: opcional para dirigir la parte web a un `BROWSER_DOM` concreto.
+
+La tool es una write no destructiva, pero **no idempotente**: repetirla persiste otra intervención y puede volver a generar consumo de proveedores. La respuesta confirma aceptación/dispatch; los participantes web y API completan sus turnos de forma asíncrona dentro del runtime de Arena y sus `turn.completed` siguen persistiendo por las rutas existentes.
 
 ## ChatGPT, Claude y Gemini
 
@@ -165,7 +175,7 @@ Nunca uses este modo en `mcp.debatidor.com`.
 - No hay una API key global de usuario embebida en producción.
 - El MCP valida bearer tokens antes de exponer tools user-scoped.
 - El backend valida audience/resource/scope y conserva autoridad de tenant/ownership.
-- La búsqueda y la indexación de contexto permanecen workspace-scoped.
+- Snapshot, quick debate, búsqueda e indexación de contexto permanecen workspace-scoped.
 - Las llaves BYOK nunca cruzan hacia el MCP.
 - Authorization codes y refresh tokens se almacenan hasheados; los refresh tokens rotan.
 - No loguear tokens, códigos OAuth, API keys ni payloads sensibles completos.
