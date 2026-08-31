@@ -56,6 +56,22 @@ export type IndexDebateContextResult = {
   cappedAt: number;
 };
 
+export type QuickDebateInput = {
+  debateId: string;
+  prompt: string;
+  mode?: 'web' | 'api' | 'both';
+  connectionId?: string;
+};
+
+export type QuickDebateResult = {
+  accepted: boolean;
+  debateId: string;
+  mode: 'web' | 'api' | 'both';
+  apiParticipants: number;
+  browserParticipants: number;
+  connectionId: string | null;
+};
+
 export type DebatidorApiAuth =
   | { type: 'api-key'; token: string }
   | { type: 'bearer'; token: string };
@@ -141,6 +157,20 @@ export class DebatidorApiClient {
         limit: input.limit,
       },
     });
+  }
+
+  async quickDebate(input: QuickDebateInput): Promise<QuickDebateResult> {
+    return this.request<QuickDebateResult>(
+      `/realtime/debates/${encodeURIComponent(input.debateId)}/quick`,
+      {
+        method: 'POST',
+        body: {
+          prompt: input.prompt,
+          mode: input.mode,
+          connectionId: input.connectionId,
+        },
+      },
+    );
   }
 
   async listDebates(): Promise<DebateSummary[]> {
