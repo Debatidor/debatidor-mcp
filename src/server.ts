@@ -4,10 +4,11 @@ import {
   DebatidorApiClient,
   DebatidorApiError,
   type ContextHit,
+  type IndexDebateContextResult,
   type LeadStatus,
 } from './debatidor-api.js';
 
-export const SERVER_VERSION = '0.4.0';
+export const SERVER_VERSION = '0.5.0';
 export const PROTOCOL_VERSION = '2026-07-28';
 
 export type DebatidorServerOptions = {
@@ -54,6 +55,15 @@ const contextSearchSchema = z.object({
   query: z.string(),
   hitCount: z.number().int().nonnegative(),
   hits: z.array(contextHitSchema),
+});
+
+const contextIndexSchema = z.object({
+  debateId: z.string(),
+  scanned: z.number().int().nonnegative(),
+  indexed: z.number().int().nonnegative(),
+  unchanged: z.number().int().nonnegative(),
+  empty: z.number().int().nonnegative(),
+  cappedAt: z.number().int().positive(),
 });
 
 const pingSchema = z.object({
@@ -110,6 +120,7 @@ export function createDebatidorServer(options: DebatidorServerOptions): McpServe
   if (options.api) {
     registerLeadStatusTool(server, options.api);
     registerSearchContextTool(server, options.api);
+    registerIndexContextTool(server, options.api);
   }
 
   return server;
@@ -212,6 +223,52 @@ function registerSearchContextTool(server: McpServer, api: DebatidorApiClient) {
   );
 }
 
+function registerIndexContextTool(server: McpServer, api: DebatidorApiClient) {
+  server.registerTool(
+    'debatidor_index_context',
+    {
+      title: 'Index Debatidor debate context',
+      description:
+        'Materialize persisted messages from one authenticated Debatidor arena into semantic long-term memory. This writes derived memory rows and uses the user OpenAI BYOK for embeddings, so it can incur provider usage. Re-running unchanged messages is idempotent and does not re-embed them.',
+      inputSchema: z.object({
+        debateId: z
+          .string()
+          .trim()
+          .min(1)
+          .describe('Debatidor debate id to index. The debate must belong to the authenticated workspace.'),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(50)
+          .optional()
+          .describe('Maximum persisted messages to scan in this indexing pass. Defaults to 50.'),
+      }),
+      outputSchema: contextIndexSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ debateId, limit }) => {
+      try {
+        const result = await api.indexDebateContext({ debateId, limit });
+        return {
+          content: [{ type: 'text', text: formatContextIndex(result) }],
+          structuredContent: result,
+        };
+      } catch (error) {
+        return {
+          content: [{ type: 'text', text: formatSafeError(error) }],
+          isError: true,
+        };
+      }
+    },
+  );
+}
+
 function formatLeadStatus(status: LeadStatus): string {
   if (status.debates.length === 0) {
     return 'No LEAD-mode arenas are currently visible in this Debatidor workspace.';
@@ -248,6 +305,16 @@ function formatContextSearch(query: string, hits: ContextHit[]): string {
   return [`Semantic context matches: ${hits.length}`, ...lines].join('\n');
 }
 
+function formatContextIndex(result: IndexDebateContextResult): string {
+  return [
+    `Debatidor context indexing completed for ${result.debateId}.`,
+    `Scanned: ${result.scanned}`,
+    `New or changed memories indexed: ${result.indexed}`,
+    `Unchanged memories skipped: ${result.unchanged}`,
+    `Empty messages skipped: ${result.empty}`,
+  ].join('\n');
+}
+
 function formatSafeError(error: unknown): string {
   if (error instanceof DebatidorApiError) {
     if (error.status === 401 || error.status === 403) {
@@ -256,8 +323,11 @@ function formatSafeError(error: unknown): string {
     if (error.code === 'lead_debate_not_found') {
       return 'That LEAD debate is not available in the authenticated Debatidor workspace.';
     }
+    if (error.code === 'vector_memory_debate_not_found') {
+      return 'That debate is not available in the authenticated Debatidor workspace.';
+    }
     if (error.code === 'provider_key_not_configured' || error.code === 'embeddings_key_required') {
-      return 'Semantic context search needs an OpenAI provider key configured in Debatidor Integrations so the backend can embed the query.';
+      return 'Semantic memory needs an OpenAI provider key configured in Debatidor Integrations so the backend can generate embeddings.';
     }
     if (error.code === 'vector_memory_query_required') {
       return 'A non-empty semantic search query is required.';
