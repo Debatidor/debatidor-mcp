@@ -6,9 +6,10 @@ import {
   type ContextHit,
   type IndexDebateContextResult,
   type LeadStatus,
+  type QuickDebateResult,
 } from './debatidor-api.js';
 
-export const SERVER_VERSION = '0.5.0';
+export const SERVER_VERSION = '0.6.0';
 export const PROTOCOL_VERSION = '2026-07-28';
 
 export type DebatidorServerOptions = {
@@ -66,6 +67,15 @@ const contextIndexSchema = z.object({
   cappedAt: z.number().int().positive(),
 });
 
+const quickDebateSchema = z.object({
+  accepted: z.boolean(),
+  debateId: z.string(),
+  mode: z.enum(['web', 'api', 'both']),
+  apiParticipants: z.number().int().nonnegative(),
+  browserParticipants: z.number().int().nonnegative(),
+  connectionId: z.string().nullable(),
+});
+
 const pingSchema = z.object({
   ok: z.literal(true),
   service: z.literal('debatidor-mcp'),
@@ -121,6 +131,7 @@ export function createDebatidorServer(options: DebatidorServerOptions): McpServe
     registerLeadStatusTool(server, options.api);
     registerSearchContextTool(server, options.api);
     registerIndexContextTool(server, options.api);
+    registerQuickDebateTool(server, options.api);
   }
 
   return server;
@@ -269,6 +280,66 @@ function registerIndexContextTool(server: McpServer, api: DebatidorApiClient) {
   );
 }
 
+function registerQuickDebateTool(server: McpServer, api: DebatidorApiClient) {
+  server.registerTool(
+    'debatidor_quick_debate',
+    {
+      title: 'Run a quick Debatidor turn',
+      description:
+        'Inject one explicit intervention into an existing Debatidor arena and delegate execution to the existing Arena runtime. The arena and participants must already exist. Depending on mode this can invoke provider APIs and/or connected browser participants, so it may incur provider usage and is not idempotent.',
+      inputSchema: z.object({
+        debateId: z
+          .string()
+          .trim()
+          .min(1)
+          .describe('Existing Debatidor arena id in the authenticated workspace.'),
+        prompt: z
+          .string()
+          .trim()
+          .min(1)
+          .max(12000)
+          .describe('Intervention to persist and dispatch through the Arena runtime.'),
+        mode: z
+          .enum(['web', 'api', 'both'])
+          .optional()
+          .describe('Dispatch target. Defaults to both existing browser and API participants.'),
+        connectionId: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe('Optional BROWSER_DOM connectionId to target one connected web participant.'),
+      }),
+      outputSchema: quickDebateSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ debateId, prompt, mode, connectionId }) => {
+      try {
+        const result = await api.quickDebate({
+          debateId,
+          prompt,
+          mode,
+          connectionId,
+        });
+        return {
+          content: [{ type: 'text', text: formatQuickDebate(result) }],
+          structuredContent: result,
+        };
+      } catch (error) {
+        return {
+          content: [{ type: 'text', text: formatSafeError(error) }],
+          isError: true,
+        };
+      }
+    },
+  );
+}
+
 function formatLeadStatus(status: LeadStatus): string {
   if (status.debates.length === 0) {
     return 'No LEAD-mode arenas are currently visible in this Debatidor workspace.';
@@ -315,6 +386,16 @@ function formatContextIndex(result: IndexDebateContextResult): string {
   ].join('\n');
 }
 
+function formatQuickDebate(result: QuickDebateResult): string {
+  const target = result.connectionId ? ` · web target ${result.connectionId}` : '';
+  return [
+    `Quick debate accepted for ${result.debateId}.`,
+    `Mode: ${result.mode}${target}`,
+    `Configured participants: ${result.apiParticipants} API · ${result.browserParticipants} browser.`,
+    'The Arena runtime is handling participant completions asynchronously.',
+  ].join('\n');
+}
+
 function formatSafeError(error: unknown): string {
   if (error instanceof DebatidorApiError) {
     if (error.status === 401 || error.status === 403) {
@@ -322,6 +403,12 @@ function formatSafeError(error: unknown): string {
     }
     if (error.code === 'lead_debate_not_found') {
       return 'That LEAD debate is not available in the authenticated Debatidor workspace.';
+    }
+    if (error.code === 'quick_debate_not_found') {
+      return 'That arena is not available in the authenticated Debatidor workspace.';
+    }
+    if (error.code === 'quick_debate_prompt_required') {
+      return 'A non-empty prompt is required to run a quick debate.';
     }
     if (error.code === 'vector_memory_debate_not_found') {
       return 'That debate is not available in the authenticated Debatidor workspace.';
