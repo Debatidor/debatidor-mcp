@@ -2,7 +2,7 @@
 
 Servidor remoto oficial de **Model Context Protocol (MCP)** para Debatidor.
 
-`debatidor-mcp` es un adaptador fino entre clientes MCP (ChatGPT, Claude, Gemini, IDEs y agentes compatibles) y `debatidor-back`. La autoridad de identidad, permisos, Arena, Lead, memoria y datos permanece en el backend.
+`debatidor-mcp` es un adaptador fino entre clientes MCP (ChatGPT, Claude, Gemini, IDEs y agentes compatibles) y `debatidor-back`. La autoridad de identidad, permisos, Arena, Lead, memoria y ejecución local permanece en el backend y en `debatidor-agent`.
 
 ## Arquitectura
 
@@ -18,27 +18,33 @@ ChatGPT / Claude / Gemini / IDEs
         OAuth bearer
               |
         debatidor-back
+          |         |
+     Arena/PAL   /agent WS
+                    |
+             debatidor-agent
+                    |
+             proyecto / shell
 ```
 
 El endpoint remoto es el camino principal. `stdio` se conserva únicamente para clientes locales/IDE y debugging.
 
 ## Estado actual
 
-Versión `0.6.0`:
+Versión `0.7.0`:
 
 - MCP TypeScript SDK v2, compatible con la revisión `2026-07-28`;
 - Streamable HTTP stateless en `/mcp`;
 - Docker + healthcheck `/health` y `/healthz`;
-- Protected Resource Metadata en `/.well-known/oauth-protected-resource`;
-- OAuth 2.1 requerido en el endpoint HTTPS de producción;
+- Protected Resource Metadata y OAuth 2.1 user-scoped;
 - `debatidor_ping` para comprobación del servicio;
 - `debatidor_get_lead_status` para Arenas `LEAD` del workspace autenticado;
 - `debatidor_search_context` para búsqueda semántica read-only;
 - `debatidor_index_context` para materializar explícitamente mensajes persistidos como memoria semántica;
 - `debatidor_quick_debate` para inyectar una intervención y delegar la ejecución al runtime existente de Arena;
+- `debatidor_agent_list`, `debatidor_agent_read`, `debatidor_agent_write` y `debatidor_agent_shell` para operar directamente el proyecto conectado por `debatidor-agent`, sin extensión DOM;
 - bridge API-key legacy únicamente para dogfooding local/privado y mutuamente excluyente con OAuth.
 
-El bootstrap `0.2.0` fue validado desde ChatGPT real; `0.3.0` añadió account linking user-scoped; `0.4.0` incorporó búsqueda semántica; `0.5.0` separó explícitamente el coste/escritura de indexación de la consulta read-only; `0.6.0` añade la primera acción de orquestación sin reimplementar el runtime en MCP.
+El bootstrap `0.2.0` fue validado desde ChatGPT real; `0.3.0` añadió account linking user-scoped; `0.4.0` incorporó búsqueda semántica; `0.5.0` separó explícitamente indexación y lectura; `0.6.0` añadió la primera acción de Arena; `0.7.0` conecta clientes MCP directamente con las capacidades locales del agent.
 
 ## Desarrollo local
 
@@ -93,15 +99,12 @@ No configures `DEBATIDOR_API_KEY` en el endpoint público.
 El MCP actúa como OAuth Resource Server y `debatidor-back` como Authorization Server.
 
 ```text
-GET /.well-known/oauth-protected-resource
-        -> authorization_servers: https://api.debatidor.com
-
 ChatGPT
   -> Authorization Code + PKCE S256
-  -> CIMD client identity
   -> consentimiento Debatidor
   -> access token user-scoped
   -> Authorization: Bearer <token> en /mcp
+  -> backend conserva userId + workspaceId
 ```
 
 El access token se valida contra el backend antes de crear las tools user-scoped. El MCP nunca usa una API key global del contenedor para representar usuarios.
@@ -118,44 +121,86 @@ Lee Arenas `LEAD` visibles en el workspace del principal OAuth. Con `debateId`, 
 
 ### `debatidor_search_context`
 
-Busca semánticamente recuerdos `MESSAGE` y `CONCLUSION` del workspace autenticado. Admite `debateId`, filtro de `kinds` y hasta 10 resultados por llamada MCP.
-
-La consulta es **read-only**. El backend genera el embedding de la query con la llave OpenAI BYOK del usuario y ejecuta la búsqueda pgvector con `workspace_id` como primera cláusula del `WHERE`; ni la llave ni los embeddings se exponen al MCP.
+Busca semánticamente recuerdos `MESSAGE` y `CONCLUSION` del workspace autenticado. La consulta es read-only; embeddings y BYOK permanecen en el backend.
 
 ### `debatidor_index_context`
 
-Materializa hasta 50 mensajes persistidos de una Arena como recuerdos `MESSAGE`. Es una acción explícita porque genera escrituras derivadas y uso del proveedor de embeddings; no se oculta dentro de `debatidor_search_context`.
-
-- requiere que la Arena pertenezca al workspace OAuth;
-- usa la llave OpenAI BYOK del usuario;
-- es no destructiva e idempotente por mensaje fuente;
-- un mensaje sin cambios no vuelve a generar embeddings;
-- un mensaje modificado actualiza la misma memoria derivada.
-
-El uso de embeddings puede generar consumo/coste en la cuenta del proveedor configurada por el usuario.
+Materializa mensajes persistidos como memoria semántica. Es una write explícita, no destructiva e idempotente por mensaje fuente; puede generar consumo del proveedor de embeddings configurado por el usuario.
 
 ### `debatidor_quick_debate`
 
-Inyecta una intervención en una Arena **ya existente** y delega el trabajo al mismo runtime que usa el canal web/CLI. No crea un segundo orquestador dentro de MCP.
+Inyecta una intervención en una Arena **ya existente** y delega el trabajo al mismo runtime que usa web/CLI. Es una write no destructiva pero no idempotente; la respuesta confirma dispatch y los participantes completan asíncronamente.
 
-Inputs principales:
+## Proyecto conectado por `debatidor-agent`
 
-- `debateId`: Arena del workspace autenticado;
-- `prompt`: intervención que se persiste como mensaje humano;
-- `mode`: `web`, `api` o `both` (default `both`);
-- `connectionId`: opcional para dirigir la parte web a un `BROWSER_DOM` concreto.
+La versión `0.7.0` añade un camino nativo para que el cliente MCP opere el proyecto del usuario sin convertir un chat web en un parser de bloques JSON:
 
-La tool es una write no destructiva, pero **no idempotente**: repetirla persiste otra intervención y puede volver a generar consumo de proveedores. La respuesta confirma aceptación/dispatch; los participantes web y API completan sus turnos de forma asíncrona dentro del runtime de Arena y sus `turn.completed` siguen persistiendo por las rutas existentes.
+```text
+ChatGPT / Claude
+      |
+  tool MCP
+      |
+debatidor-mcp
+      |
+debatidor-back
+      |
+  /agent WS
+      |
+debatidor-agent
+      |
+filesystem / shell
+      |
+ resultado MCP
+      |
+mismo turno del cliente
+```
+
+Arranca el agent en el proyecto que quieres exponer:
+
+```bash
+cd mi-proyecto
+debatidor connect --remote
+```
+
+Las tools de filesystem quedan confinadas al `cwd` del agent por `fs-guard` y el backend rechaza rutas absolutas o traversal (`..`).
+
+### `debatidor_agent_list`
+
+Lista un directorio relativo al proyecto. Read-only e idempotente.
+
+### `debatidor_agent_read`
+
+Lee un archivo relativo al proyecto. Read-only e idempotente.
+
+### `debatidor_agent_write`
+
+Crea o reemplaza un archivo relativo al proyecto. Es una acción destructiva en el sentido MCP porque modifica disco; repetir exactamente el mismo contenido es idempotente.
+
+### `debatidor_agent_shell`
+
+Ejecuta **un comando no interactivo** en el proyecto. Se marca destructiva y no idempotente porque un comando puede modificar archivos, Git o sistemas externos.
+
+El runner headless **deniega shell por defecto**. Para habilitarla conscientemente:
+
+```bash
+debatidor connect --remote --shell-auto
+```
+
+Sin `--shell-auto`, `debatidor_agent_shell` devuelve `denied_headless_shell_disabled`; list/read/write siguen disponibles.
+
+Si hay varios agents conectados bajo el mismo usuario/workspace, las tools aceptan `agentId` opcional. Si se omite, el backend usa el primer agent conectado del principal autenticado.
+
+Los outputs grandes de archivo/shell se acotan antes de volver al contexto MCP para evitar inflar innecesariamente la conversación.
 
 ## ChatGPT, Claude y Gemini
 
 El core no contiene adapters específicos por proveedor. Todos deben consumir el mismo MCP remoto.
 
-- ChatGPT: Developer Mode / MCP app; primer cliente de aceptación.
+- ChatGPT: app/Developer Mode MCP; primer cliente de aceptación.
 - Claude: Custom Connector remote MCP; segundo cliente de portabilidad previsto.
 - Gemini y otros hosts: mismo endpoint cuando su producto soporte remote MCP compatible.
 
-CIMD es la ruta principal de identificación OAuth. DCR se añadirá solo como fallback si un segundo cliente objetivo lo requiere.
+La dirección nativa soportada es **cliente MCP → Debatidor → agent → resultado al mismo turno**. El servidor MCP no intenta empujar espontáneamente mensajes desde el CLI hacia una conversación web; para ese caso sigue existiendo la extensión DOM.
 
 ## stdio / bridge legacy
 
@@ -174,9 +219,9 @@ Nunca uses este modo en `mcp.debatidor.com`.
 
 - No hay una API key global de usuario embebida en producción.
 - El MCP valida bearer tokens antes de exponer tools user-scoped.
-- El backend valida audience/resource/scope y conserva autoridad de tenant/ownership.
-- Snapshot, quick debate, búsqueda e indexación de contexto permanecen workspace-scoped.
+- El backend conserva autoridad de tenant/ownership y enruta resultados del agent por `userId + workspaceId`.
+- Rutas de filesystem se validan en backend y nuevamente en `debatidor-agent`.
+- Shell remota queda apagada salvo opt-in explícito `--shell-auto`.
 - Las llaves BYOK nunca cruzan hacia el MCP.
-- Authorization codes y refresh tokens se almacenan hasheados; los refresh tokens rotan.
 - No loguear tokens, códigos OAuth, API keys ni payloads sensibles completos.
-- Las tools con efectos deben declarar annotations MCP acordes a su comportamiento y respetar autorización/confirmación del cliente.
+- Las tools con efectos declaran annotations MCP acordes a su comportamiento.
