@@ -24,6 +24,24 @@ export type LeadStatus = {
   participants?: ParticipantSummary[];
 };
 
+export type ContextKind = 'MESSAGE' | 'CONCLUSION';
+
+export type ContextHit = {
+  id: string;
+  debateId: string | null;
+  kind: ContextKind;
+  content: string;
+  similarity: number;
+  createdAt?: string;
+};
+
+export type SearchContextInput = {
+  query: string;
+  debateId?: string;
+  kinds?: ContextKind[];
+  limit?: number;
+};
+
 export type DebatidorApiAuth =
   | { type: 'api-key'; token: string }
   | { type: 'bearer'; token: string };
@@ -85,23 +103,57 @@ export class DebatidorApiClient {
     };
   }
 
+  async searchContext(input: SearchContextInput): Promise<ContextHit[]> {
+    const result = await this.request<unknown>('/vector-memory/search', {
+      method: 'POST',
+      body: {
+        query: input.query,
+        debateId: input.debateId,
+        kinds: input.kinds,
+        limit: input.limit,
+      },
+    });
+    if (!Array.isArray(result)) return [];
+    return result.map(compactContextHit);
+  }
+
   async listDebates(): Promise<DebateSummary[]> {
     const result = await this.request<unknown>('/realtime/debates');
     return Array.isArray(result) ? (result as DebateSummary[]) : [];
   }
 
-  private async request<T = unknown>(path: string): Promise<T> {
+  private async request<T = unknown>(
+    path: string,
+    options: { method?: 'GET' | 'POST'; body?: unknown } = {},
+  ): Promise<T> {
     const headers: Record<string, string> = { accept: 'application/json' };
     if (this.auth.type === 'api-key') headers['x-api-key'] = this.auth.token;
     else headers.authorization = `Bearer ${this.auth.token}`;
+    if (options.body !== undefined) headers['content-type'] = 'application/json';
 
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, { headers });
+    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      method: options.method ?? 'GET',
+      headers,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    });
 
     if (!response.ok) {
       let code: string | undefined;
       try {
-        const body = (await response.json()) as { message?: string };
-        code = body?.message;
+        const body = (await response.json()) as {
+          code?: unknown;
+          message?: unknown;
+        };
+        if (typeof body.code === 'string') code = body.code;
+        else if (typeof body.message === 'string') code = body.message;
+        else if (
+          body.message &&
+          typeof body.message === 'object' &&
+          'code' in body.message &&
+          typeof (body.message as { code?: unknown }).code === 'string'
+        ) {
+          code = (body.message as { code: string }).code;
+        }
       } catch {
         // Keep upstream error bodies out of MCP output by default.
       }
@@ -138,6 +190,18 @@ function compactParticipant(participant: ParticipantSummary): ParticipantSummary
     status: participant.status ? String(participant.status) : undefined,
     providerId: participant.providerId ? String(participant.providerId) : undefined,
     modelId: participant.modelId ? String(participant.modelId) : undefined,
+  };
+}
+
+function compactContextHit(hit: unknown): ContextHit {
+  const row = (hit && typeof hit === 'object' ? hit : {}) as Record<string, unknown>;
+  return {
+    id: String(row.id ?? ''),
+    debateId: row.debateId == null ? null : String(row.debateId),
+    kind: row.kind === 'CONCLUSION' ? 'CONCLUSION' : 'MESSAGE',
+    content: String(row.content ?? ''),
+    similarity: Number.isFinite(Number(row.similarity)) ? Number(row.similarity) : 0,
+    createdAt: row.createdAt ? String(row.createdAt) : undefined,
   };
 }
 

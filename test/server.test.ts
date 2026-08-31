@@ -67,6 +67,7 @@ test('authenticated bridge exposes Lead status', async () => {
     const tools = await client.listTools();
     assert.ok(tools.tools.some((tool) => tool.name === 'debatidor_ping'));
     assert.ok(tools.tools.some((tool) => tool.name === 'debatidor_get_lead_status'));
+    assert.ok(tools.tools.some((tool) => tool.name === 'debatidor_search_context'));
 
     const result = await client.callTool({
       name: 'debatidor_get_lead_status',
@@ -101,4 +102,91 @@ test('specific Lead status validates workspace ownership before snapshot lookup'
   );
   await assert.rejects(() => api.getLeadStatus('other'), /lead_debate_not_found/);
   assert.equal(calls.length, 1);
+});
+
+test('authenticated context search is read-only, bearer-scoped and bounded', async () => {
+  let seenRequest: RequestInit | undefined;
+  const upstream: typeof fetch = async (_input, init) => {
+    seenRequest = init;
+    return jsonResponse([
+      {
+        id: 'mem_1',
+        workspaceId: 'ws_hidden',
+        debateId: 'deb_lead',
+        kind: 'CONCLUSION',
+        content: 'Use the MCP endpoint as the stable integration boundary.',
+        embeddingModel: 'text-embedding-3-small',
+        dimensions: 1536,
+        createdAt: '2026-08-30T20:00:00.000Z',
+        similarity: '0.9123',
+      },
+    ]);
+  };
+
+  const api = new DebatidorApiClient(
+    'https://api.test',
+    { type: 'bearer', token: 'oauth_context_test' },
+    upstream,
+  );
+
+  await withClient(api, async (client) => {
+    const result = await client.callTool({
+      name: 'debatidor_search_context',
+      arguments: {
+        query: 'integration boundary',
+        debateId: 'deb_lead',
+        kinds: ['CONCLUSION'],
+        limit: 3,
+      },
+    });
+
+    assert.equal(result.isError, undefined);
+    const structured = result.structuredContent as {
+      query: string;
+      hitCount: number;
+      hits: Array<{ id: string; similarity: number; kind: string }>;
+    };
+    assert.equal(structured.query, 'integration boundary');
+    assert.equal(structured.hitCount, 1);
+    assert.deepEqual(structured.hits[0], {
+      id: 'mem_1',
+      debateId: 'deb_lead',
+      kind: 'CONCLUSION',
+      content: 'Use the MCP endpoint as the stable integration boundary.',
+      similarity: 0.9123,
+      createdAt: '2026-08-30T20:00:00.000Z',
+    });
+  });
+
+  assert.equal(seenRequest?.method, 'POST');
+  assert.equal((seenRequest?.headers as Record<string, string>).authorization, 'Bearer oauth_context_test');
+  assert.equal((seenRequest?.headers as Record<string, string>)['content-type'], 'application/json');
+  assert.deepEqual(JSON.parse(String(seenRequest?.body)), {
+    query: 'integration boundary',
+    debateId: 'deb_lead',
+    kinds: ['CONCLUSION'],
+    limit: 3,
+  });
+});
+
+test('context search reports missing embeddings key without leaking upstream bodies', async () => {
+  const upstream: typeof fetch = async () =>
+    jsonResponse({ statusCode: 400, message: 'provider_key_not_configured' }, 400);
+
+  const api = new DebatidorApiClient(
+    'https://api.test',
+    { type: 'bearer', token: 'oauth_context_test' },
+    upstream,
+  );
+
+  await withClient(api, async (client) => {
+    const result = await client.callTool({
+      name: 'debatidor_search_context',
+      arguments: { query: 'where is the conclusion?' },
+    });
+    assert.equal(result.isError, true);
+    const text = (result.content as Array<{ type: string; text?: string }>)[0]?.text ?? '';
+    assert.match(text, /OpenAI provider key configured/i);
+    assert.doesNotMatch(text, /oauth_context_test/);
+  });
 });

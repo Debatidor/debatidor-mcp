@@ -1,8 +1,13 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
-import { DebatidorApiClient, DebatidorApiError, type LeadStatus } from './debatidor-api.js';
+import {
+  DebatidorApiClient,
+  DebatidorApiError,
+  type ContextHit,
+  type LeadStatus,
+} from './debatidor-api.js';
 
-export const SERVER_VERSION = '0.3.0';
+export const SERVER_VERSION = '0.4.0';
 export const PROTOCOL_VERSION = '2026-07-28';
 
 export type DebatidorServerOptions = {
@@ -34,6 +39,21 @@ const leadStatusSchema = z.object({
   activeCount: z.number().int().nonnegative(),
   debates: z.array(debateSchema),
   participants: z.array(participantSchema).optional(),
+});
+
+const contextHitSchema = z.object({
+  id: z.string(),
+  debateId: z.string().nullable(),
+  kind: z.enum(['MESSAGE', 'CONCLUSION']),
+  content: z.string(),
+  similarity: z.number(),
+  createdAt: z.string().optional(),
+});
+
+const contextSearchSchema = z.object({
+  query: z.string(),
+  hitCount: z.number().int().nonnegative(),
+  hits: z.array(contextHitSchema),
 });
 
 const pingSchema = z.object({
@@ -89,6 +109,7 @@ export function createDebatidorServer(options: DebatidorServerOptions): McpServe
 
   if (options.api) {
     registerLeadStatusTool(server, options.api);
+    registerSearchContextTool(server, options.api);
   }
 
   return server;
@@ -133,6 +154,64 @@ function registerLeadStatusTool(server: McpServer, api: DebatidorApiClient) {
   );
 }
 
+function registerSearchContextTool(server: McpServer, api: DebatidorApiClient) {
+  server.registerTool(
+    'debatidor_search_context',
+    {
+      title: 'Search Debatidor context',
+      description:
+        'Semantically search long-term MESSAGE and CONCLUSION memories in the authenticated Debatidor workspace. Optionally scope the search to one debate. This is read-only and never searches another workspace.',
+      inputSchema: z.object({
+        query: z
+          .string()
+          .trim()
+          .min(1)
+          .max(2000)
+          .describe('Natural-language semantic query to search in Debatidor long-term memory.'),
+        debateId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('Optional debate id to restrict results to one arena.'),
+        kinds: z
+          .array(z.enum(['MESSAGE', 'CONCLUSION']))
+          .max(2)
+          .optional()
+          .describe('Optional memory kinds. Omit to search both messages and conclusions.'),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(10)
+          .optional()
+          .describe('Maximum number of semantic matches. Defaults to the backend limit.'),
+      }),
+      outputSchema: contextSearchSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ query, debateId, kinds, limit }) => {
+      try {
+        const hits = await api.searchContext({ query, debateId, kinds, limit });
+        const result = { query, hitCount: hits.length, hits };
+        return {
+          content: [{ type: 'text', text: formatContextSearch(query, hits) }],
+          structuredContent: result,
+        };
+      } catch (error) {
+        return {
+          content: [{ type: 'text', text: formatSafeError(error) }],
+          isError: true,
+        };
+      }
+    },
+  );
+}
+
 function formatLeadStatus(status: LeadStatus): string {
   if (status.debates.length === 0) {
     return 'No LEAD-mode arenas are currently visible in this Debatidor workspace.';
@@ -157,6 +236,18 @@ function formatLeadStatus(status: LeadStatus): string {
   return [`Active LEAD arenas: ${status.activeCount}`, ...lines].join('\n');
 }
 
+function formatContextSearch(query: string, hits: ContextHit[]): string {
+  if (hits.length === 0) {
+    return `No long-term Debatidor context matched: ${query}`;
+  }
+
+  const lines = hits.map((hit) => {
+    const debate = hit.debateId ? ` · debate ${hit.debateId}` : '';
+    return `- [${hit.kind}] similarity ${hit.similarity.toFixed(3)}${debate}\n  ${hit.content}`;
+  });
+  return [`Semantic context matches: ${hits.length}`, ...lines].join('\n');
+}
+
 function formatSafeError(error: unknown): string {
   if (error instanceof DebatidorApiError) {
     if (error.status === 401 || error.status === 403) {
@@ -165,7 +256,13 @@ function formatSafeError(error: unknown): string {
     if (error.code === 'lead_debate_not_found') {
       return 'That LEAD debate is not available in the authenticated Debatidor workspace.';
     }
+    if (error.code === 'provider_key_not_configured' || error.code === 'embeddings_key_required') {
+      return 'Semantic context search needs an OpenAI provider key configured in Debatidor Integrations so the backend can embed the query.';
+    }
+    if (error.code === 'vector_memory_query_required') {
+      return 'A non-empty semantic search query is required.';
+    }
     return `Debatidor API request failed (${error.status}).`;
   }
-  return 'Debatidor MCP could not read Lead status.';
+  return 'Debatidor MCP could not complete the request.';
 }
