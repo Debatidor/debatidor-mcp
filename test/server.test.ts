@@ -51,7 +51,7 @@ test('public bootstrap exposes ping but not user-data tools', async () => {
   });
 });
 
-test('authenticated bridge exposes Lead status', async () => {
+test('authenticated bridge exposes Lead and memory tools', async () => {
   const upstream: typeof fetch = async () =>
     jsonResponse([
       { id: 'deb_lead', title: 'Lead room', mode: 'LEAD', status: 'RUNNING', currentRound: 2, roundsLimit: 5 },
@@ -68,6 +68,7 @@ test('authenticated bridge exposes Lead status', async () => {
     assert.ok(tools.tools.some((tool) => tool.name === 'debatidor_ping'));
     assert.ok(tools.tools.some((tool) => tool.name === 'debatidor_get_lead_status'));
     assert.ok(tools.tools.some((tool) => tool.name === 'debatidor_search_context'));
+    assert.ok(tools.tools.some((tool) => tool.name === 'debatidor_index_context'));
 
     const result = await client.callTool({
       name: 'debatidor_get_lead_status',
@@ -166,6 +167,60 @@ test('authenticated context search is read-only, bearer-scoped and bounded', asy
     debateId: 'deb_lead',
     kinds: ['CONCLUSION'],
     limit: 3,
+  });
+});
+
+test('context indexing is explicit, bearer-scoped and annotated as a non-destructive write', async () => {
+  let seenUrl = '';
+  let seenRequest: RequestInit | undefined;
+  const upstream: typeof fetch = async (input, init) => {
+    seenUrl = String(input);
+    seenRequest = init;
+    return jsonResponse({
+      debateId: 'deb_lead',
+      scanned: 3,
+      indexed: 2,
+      unchanged: 1,
+      empty: 0,
+      cappedAt: 50,
+    });
+  };
+
+  const api = new DebatidorApiClient(
+    'https://api.test',
+    { type: 'bearer', token: 'oauth_index_test' },
+    upstream,
+  );
+
+  await withClient(api, async (client) => {
+    const tools = await client.listTools();
+    const tool = tools.tools.find((candidate) => candidate.name === 'debatidor_index_context');
+    assert.ok(tool);
+    assert.equal(tool.annotations?.readOnlyHint, false);
+    assert.equal(tool.annotations?.destructiveHint, false);
+    assert.equal(tool.annotations?.idempotentHint, true);
+
+    const result = await client.callTool({
+      name: 'debatidor_index_context',
+      arguments: { debateId: 'deb_lead', limit: 10 },
+    });
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(result.structuredContent, {
+      debateId: 'deb_lead',
+      scanned: 3,
+      indexed: 2,
+      unchanged: 1,
+      empty: 0,
+      cappedAt: 50,
+    });
+  });
+
+  assert.equal(seenUrl, 'https://api.test/vector-memory/index-debate');
+  assert.equal(seenRequest?.method, 'POST');
+  assert.equal((seenRequest?.headers as Record<string, string>).authorization, 'Bearer oauth_index_test');
+  assert.deepEqual(JSON.parse(String(seenRequest?.body)), {
+    debateId: 'deb_lead',
+    limit: 10,
   });
 });
 

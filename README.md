@@ -2,7 +2,7 @@
 
 Servidor remoto oficial de **Model Context Protocol (MCP)** para Debatidor.
 
-`debatidor-mcp` es un adaptador fino entre clientes MCP (ChatGPT, Claude, Gemini, IDEs y agentes compatibles) y `debatidor-back`. La autoridad de identidad, permisos, Arena, Lead y datos permanece en el backend.
+`debatidor-mcp` es un adaptador fino entre clientes MCP (ChatGPT, Claude, Gemini, IDEs y agentes compatibles) y `debatidor-back`. La autoridad de identidad, permisos, Arena, Lead, memoria y datos permanece en el backend.
 
 ## Arquitectura
 
@@ -24,7 +24,7 @@ El endpoint remoto es el camino principal. `stdio` se conserva únicamente para 
 
 ## Estado actual
 
-Versión `0.4.0`:
+Versión `0.5.0`:
 
 - MCP TypeScript SDK v2, compatible con la revisión `2026-07-28`;
 - Streamable HTTP stateless en `/mcp`;
@@ -32,11 +32,12 @@ Versión `0.4.0`:
 - Protected Resource Metadata en `/.well-known/oauth-protected-resource`;
 - OAuth 2.1 requerido en el endpoint HTTPS de producción;
 - `debatidor_ping` para comprobación del servicio;
-- `debatidor_get_lead_status` disponible con el principal OAuth del usuario;
-- `debatidor_search_context` para búsqueda semántica read-only sobre la memoria vectorial del workspace;
-- bridge API-key legacy conservado únicamente para dogfooding local/privado y mutuamente excluyente con OAuth.
+- `debatidor_get_lead_status` para Arenas `LEAD` del workspace autenticado;
+- `debatidor_search_context` para búsqueda semántica read-only;
+- `debatidor_index_context` para materializar explícitamente mensajes persistidos como memoria semántica;
+- bridge API-key legacy únicamente para dogfooding local/privado y mutuamente excluyente con OAuth.
 
-El bootstrap `0.2.0` fue validado desde una conversación real de ChatGPT Developer Mode. La vertical `0.3.0` añadió account linking user-scoped y `0.4.0` incorpora la primera capacidad de contexto persistente sin ampliar privilegios de escritura.
+El bootstrap `0.2.0` fue validado desde ChatGPT real; `0.3.0` añadió account linking user-scoped; `0.4.0` incorporó búsqueda semántica y `0.5.0` separa explícitamente el coste/escritura de indexación de la consulta read-only.
 
 ## Desarrollo local
 
@@ -102,9 +103,7 @@ ChatGPT
   -> Authorization: Bearer <token> en /mcp
 ```
 
-El access token se valida contra el backend antes de crear las tools de la request. Por eso las tools user-scoped heredan el workspace del usuario conectado y no una API key global del contenedor.
-
-Para el primer dogfood, el navegador debe tener una sesión válida de Debatidor antes de comenzar el consentimiento. La redirección automática a login cuando no hay sesión es polish posterior.
+El access token se valida contra el backend antes de crear las tools user-scoped. El MCP nunca usa una API key global del contenedor para representar usuarios.
 
 ## Tools
 
@@ -114,13 +113,25 @@ Comprueba versión/protocolo/reachability. No devuelve datos privados.
 
 ### `debatidor_get_lead_status`
 
-Lee Arenas `LEAD` visibles en el workspace del principal OAuth. Con `debateId`, valida primero ownership mediante el listado workspace-scoped antes de consultar el snapshot.
+Lee Arenas `LEAD` visibles en el workspace del principal OAuth. Con `debateId`, valida ownership antes de leer detalle.
 
 ### `debatidor_search_context`
 
-Busca semánticamente recuerdos `MESSAGE` y `CONCLUSION` de la memoria vectorial de largo plazo del workspace autenticado. Admite `debateId`, filtro de `kinds` y hasta 10 resultados por llamada desde MCP.
+Busca semánticamente recuerdos `MESSAGE` y `CONCLUSION` del workspace autenticado. Admite `debateId`, filtro de `kinds` y hasta 10 resultados por llamada MCP.
 
-La consulta es read-only y el aislamiento de tenant ocurre en `debatidor-back`: `workspace_id` es la primera cláusula del `WHERE` de búsqueda, no un filtro posterior. Para generar el embedding de la consulta, el backend usa la llave OpenAI configurada por el usuario en la bóveda BYOK de Debatidor; el MCP nunca recibe ni reenvía esa llave.
+La consulta es **read-only**. El backend genera el embedding de la query con la llave OpenAI BYOK del usuario y ejecuta la búsqueda pgvector con `workspace_id` como primera cláusula del `WHERE`; ni la llave ni los embeddings se exponen al MCP.
+
+### `debatidor_index_context`
+
+Materializa hasta 50 mensajes persistidos de una Arena como recuerdos `MESSAGE`. Es una acción explícita porque genera escrituras derivadas y uso del proveedor de embeddings; no se oculta dentro de `debatidor_search_context`.
+
+- requiere que la Arena pertenezca al workspace OAuth;
+- usa la llave OpenAI BYOK del usuario;
+- es no destructiva e idempotente por mensaje fuente;
+- un mensaje sin cambios no vuelve a generar embeddings;
+- un mensaje modificado actualiza la misma memoria derivada.
+
+El uso de embeddings puede generar consumo/coste en la cuenta del proveedor configurada por el usuario.
 
 Siguiente tool de P7:
 
@@ -134,7 +145,7 @@ El core no contiene adapters específicos por proveedor. Todos deben consumir el
 - Claude: Custom Connector remote MCP; segundo cliente de portabilidad previsto.
 - Gemini y otros hosts: mismo endpoint cuando su producto soporte remote MCP compatible.
 
-CIMD es la ruta principal de identificación OAuth. DCR se añadirá solo como fallback de interoperabilidad si un cliente objetivo todavía lo exige.
+CIMD es la ruta principal de identificación OAuth. DCR se añadirá solo como fallback si un segundo cliente objetivo lo requiere.
 
 ## stdio / bridge legacy
 
@@ -154,7 +165,8 @@ Nunca uses este modo en `mcp.debatidor.com`.
 - No hay una API key global de usuario embebida en producción.
 - El MCP valida bearer tokens antes de exponer tools user-scoped.
 - El backend valida audience/resource/scope y conserva autoridad de tenant/ownership.
-- La búsqueda de contexto permanece workspace-scoped en el backend y no expone embeddings ni claves de proveedor.
+- La búsqueda y la indexación de contexto permanecen workspace-scoped.
+- Las llaves BYOK nunca cruzan hacia el MCP.
 - Authorization codes y refresh tokens se almacenan hasheados; los refresh tokens rotan.
 - No loguear tokens, códigos OAuth, API keys ni payloads sensibles completos.
-- Las futuras tools de escritura deben declarar annotations MCP correctas y respetar autorización/confirmación del cliente.
+- Las tools con efectos deben declarar annotations MCP acordes a su comportamiento y respetar autorización/confirmación del cliente.

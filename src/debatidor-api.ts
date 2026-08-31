@@ -42,6 +42,20 @@ export type SearchContextInput = {
   limit?: number;
 };
 
+export type IndexDebateContextInput = {
+  debateId: string;
+  limit?: number;
+};
+
+export type IndexDebateContextResult = {
+  debateId: string;
+  scanned: number;
+  indexed: number;
+  unchanged: number;
+  empty: number;
+  cappedAt: number;
+};
+
 export type DebatidorApiAuth =
   | { type: 'api-key'; token: string }
   | { type: 'bearer'; token: string };
@@ -115,6 +129,18 @@ export class DebatidorApiClient {
     });
     if (!Array.isArray(result)) return [];
     return result.map(compactContextHit);
+  }
+
+  async indexDebateContext(
+    input: IndexDebateContextInput,
+  ): Promise<IndexDebateContextResult> {
+    return this.request<IndexDebateContextResult>('/vector-memory/index-debate', {
+      method: 'POST',
+      body: {
+        debateId: input.debateId,
+        limit: input.limit,
+      },
+    });
   }
 
   async listDebates(): Promise<DebateSummary[]> {
