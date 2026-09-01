@@ -2,7 +2,7 @@
 
 Servidor remoto oficial de **Model Context Protocol (MCP)** para Debatidor.
 
-`debatidor-mcp` es un adaptador fino entre clientes MCP (ChatGPT, Claude, Gemini, IDEs y agentes compatibles) y `debatidor-back`. La autoridad de identidad, permisos, Arena, Lead, memoria y datos permanece en el backend.
+`debatidor-mcp` es un adaptador fino entre clientes MCP (ChatGPT, Claude, Gemini, IDEs y agentes compatibles) y `debatidor-back`. La autoridad de identidad, permisos, Arena, Lead, memoria y datos permanece en el backend; la ejecución de filesystem/shell permanece en `debatidor-agent`.
 
 ## Arquitectura
 
@@ -18,13 +18,19 @@ ChatGPT / Claude / Gemini / IDEs
         OAuth bearer
               |
         debatidor-back
+          |         |
+     Arena/PAL   /agent WS
+                    |
+             debatidor-agent
+                    |
+             proyecto / shell
 ```
 
 El endpoint remoto es el camino principal. `stdio` se conserva únicamente para clientes locales/IDE y debugging.
 
 ## Estado actual
 
-Versión `0.6.0`:
+Versión `0.7.0`:
 
 - MCP TypeScript SDK v2, compatible con la revisión `2026-07-28`;
 - Streamable HTTP stateless en `/mcp`;
@@ -36,9 +42,10 @@ Versión `0.6.0`:
 - `debatidor_search_context` para búsqueda semántica read-only;
 - `debatidor_index_context` para materializar explícitamente mensajes persistidos como memoria semántica;
 - `debatidor_quick_debate` para inyectar una intervención y delegar la ejecución al runtime existente de Arena;
+- `debatidor_agent_list`, `debatidor_agent_read`, `debatidor_agent_write` y `debatidor_agent_shell` para operar directamente el proyecto conectado por `debatidor-agent`, sin extensión DOM;
 - bridge API-key legacy únicamente para dogfooding local/privado y mutuamente excluyente con OAuth.
 
-El bootstrap `0.2.0` fue validado desde ChatGPT real; `0.3.0` añadió account linking user-scoped; `0.4.0` incorporó búsqueda semántica; `0.5.0` separó explícitamente el coste/escritura de indexación de la consulta read-only; `0.6.0` añade la primera acción de orquestación sin reimplementar el runtime en MCP.
+El bootstrap `0.2.0` fue validado desde ChatGPT real; `0.3.0` añadió account linking user-scoped; `0.4.0` incorporó búsqueda semántica; `0.5.0` separó explícitamente el coste/escritura de indexación de la consulta read-only; `0.6.0` añadió la primera acción de orquestación sin reimplementar el runtime en MCP; `0.7.0` conecta clientes MCP directamente con las capacidades locales del agent.
 
 ## Desarrollo local
 
@@ -147,6 +154,67 @@ Inputs principales:
 
 La tool es una write no destructiva, pero **no idempotente**: repetirla persiste otra intervención y puede volver a generar consumo de proveedores. La respuesta confirma aceptación/dispatch; los participantes web y API completan sus turnos de forma asíncrona dentro del runtime de Arena y sus `turn.completed` siguen persistiendo por las rutas existentes.
 
+## Proyecto conectado por `debatidor-agent`
+
+La versión `0.7.0` añade el camino nativo para que un cliente MCP maneje el proyecto conectado del usuario sin convertir un chat web en un parser de bloques JSON:
+
+```text
+ChatGPT / Claude
+      |
+  tool MCP
+      |
+debatidor-mcp
+      |
+debatidor-back
+      |
+  /agent WS
+      |
+debatidor-agent
+      |
+filesystem / shell
+      |
+ resultado MCP
+      |
+mismo turno del cliente
+```
+
+Arranca el agent desde el proyecto que quieres exponer:
+
+```bash
+cd mi-proyecto
+debatidor connect --remote
+```
+
+Las operaciones de filesystem quedan confinadas al `cwd` del agent por `fs-guard`. El backend rechaza además rutas absolutas y traversal (`..`) antes de enviarlas al runner; el agent vuelve a validarlas de forma portable para rutas Unix/Windows.
+
+### `debatidor_agent_list`
+
+Lista un directorio relativo al proyecto. Read-only e idempotente.
+
+### `debatidor_agent_read`
+
+Lee un archivo relativo al proyecto. Read-only e idempotente.
+
+### `debatidor_agent_write`
+
+Crea o reemplaza un archivo relativo al proyecto. Es una acción destructiva en el sentido MCP porque modifica disco; repetir exactamente el mismo contenido es idempotente.
+
+### `debatidor_agent_shell`
+
+Ejecuta **un comando no interactivo** en el proyecto. Se marca destructiva y no idempotente porque un comando puede modificar archivos, Git o sistemas externos.
+
+El runner headless **deniega shell por defecto**. Para habilitarla conscientemente:
+
+```bash
+debatidor connect --remote --shell-auto
+```
+
+Sin `--shell-auto`, `debatidor_agent_shell` devuelve `denied_headless_shell_disabled`; list/read/write siguen disponibles. `cwd`, cuando se usa para shell, también debe ser relativo y permanecer dentro de la raíz del proyecto.
+
+Si hay varios agents conectados bajo el mismo usuario/workspace, las tools aceptan `agentId` opcional. Si se omite, el backend usa el primer agent conectado del principal autenticado.
+
+Los outputs grandes de archivo/shell se acotan antes de volver al contexto MCP para evitar inflar innecesariamente la conversación.
+
 ## ChatGPT, Claude y Gemini
 
 El core no contiene adapters específicos por proveedor. Todos deben consumir el mismo MCP remoto.
@@ -156,6 +224,8 @@ El core no contiene adapters específicos por proveedor. Todos deben consumir el
 - Gemini y otros hosts: mismo endpoint cuando su producto soporte remote MCP compatible.
 
 CIMD es la ruta principal de identificación OAuth. DCR se añadirá solo como fallback si un segundo cliente objetivo lo requiere.
+
+La dirección nativa nueva es **cliente MCP → Debatidor → agent → resultado al mismo turno**. El servidor MCP no intenta empujar espontáneamente mensajes desde el CLI hacia una conversación web; para ese sentido sigue existiendo la extensión DOM o un runtime de modelo controlado por API.
 
 ## stdio / bridge legacy
 
@@ -175,7 +245,10 @@ Nunca uses este modo en `mcp.debatidor.com`.
 - No hay una API key global de usuario embebida en producción.
 - El MCP valida bearer tokens antes de exponer tools user-scoped.
 - El backend valida audience/resource/scope y conserva autoridad de tenant/ownership.
-- Snapshot, quick debate, búsqueda e indexación de contexto permanecen workspace-scoped.
+- Snapshot, quick debate, búsqueda, indexación y ejecución del agent permanecen user/workspace-scoped.
+- Los resultados `agent.file_result` solo resuelven tareas pendientes del mismo `userId + workspaceId`.
+- Rutas de filesystem se validan en backend y nuevamente en `debatidor-agent`, incluyendo semántica portable Unix/Windows.
+- Shell remota queda apagada salvo opt-in explícito `--shell-auto`.
 - Las llaves BYOK nunca cruzan hacia el MCP.
 - Authorization codes y refresh tokens se almacenan hasheados; los refresh tokens rotan.
 - No loguear tokens, códigos OAuth, API keys ni payloads sensibles completos.

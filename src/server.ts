@@ -3,13 +3,14 @@ import * as z from 'zod/v4';
 import {
   DebatidorApiClient,
   DebatidorApiError,
+  type AgentExecutionResult,
   type ContextHit,
   type IndexDebateContextResult,
   type LeadStatus,
   type QuickDebateResult,
 } from './debatidor-api.js';
 
-export const SERVER_VERSION = '0.6.0';
+export const SERVER_VERSION = '0.7.0';
 export const PROTOCOL_VERSION = '2026-07-28';
 
 export type DebatidorServerOptions = {
@@ -76,6 +77,20 @@ const quickDebateSchema = z.object({
   connectionId: z.string().nullable(),
 });
 
+const agentResultSchema = z.object({
+  tool: z.enum(['fs.list', 'fs.read', 'fs.write', 'shell.run']),
+  agentId: z.string().nullable(),
+  ok: z.boolean().optional(),
+  path: z.string().optional(),
+  bytes: z.number().int().nonnegative().optional(),
+  content: z.string().optional(),
+  entries: z.array(z.string()).optional(),
+  error: z.string().optional(),
+  output: z.string().optional(),
+  exitCode: z.number().int().nullable().optional(),
+  truncated: z.boolean().optional(),
+});
+
 const pingSchema = z.object({
   ok: z.literal(true),
   service: z.literal('debatidor-mcp'),
@@ -132,6 +147,7 @@ export function createDebatidorServer(options: DebatidorServerOptions): McpServe
     registerSearchContextTool(server, options.api);
     registerIndexContextTool(server, options.api);
     registerQuickDebateTool(server, options.api);
+    registerAgentTools(server, options.api);
   }
 
   return server;
@@ -167,10 +183,7 @@ function registerLeadStatusTool(server: McpServer, api: DebatidorApiClient) {
           structuredContent: status,
         };
       } catch (error) {
-        return {
-          content: [{ type: 'text', text: formatSafeError(error) }],
-          isError: true,
-        };
+        return safeToolError(error);
       }
     },
   );
@@ -225,10 +238,7 @@ function registerSearchContextTool(server: McpServer, api: DebatidorApiClient) {
           structuredContent: result,
         };
       } catch (error) {
-        return {
-          content: [{ type: 'text', text: formatSafeError(error) }],
-          isError: true,
-        };
+        return safeToolError(error);
       }
     },
   );
@@ -271,10 +281,7 @@ function registerIndexContextTool(server: McpServer, api: DebatidorApiClient) {
           structuredContent: result,
         };
       } catch (error) {
-        return {
-          content: [{ type: 'text', text: formatSafeError(error) }],
-          isError: true,
-        };
+        return safeToolError(error);
       }
     },
   );
@@ -320,24 +327,184 @@ function registerQuickDebateTool(server: McpServer, api: DebatidorApiClient) {
     },
     async ({ debateId, prompt, mode, connectionId }) => {
       try {
-        const result = await api.quickDebate({
-          debateId,
-          prompt,
-          mode,
-          connectionId,
-        });
+        const result = await api.quickDebate({ debateId, prompt, mode, connectionId });
         return {
           content: [{ type: 'text', text: formatQuickDebate(result) }],
           structuredContent: result,
         };
       } catch (error) {
-        return {
-          content: [{ type: 'text', text: formatSafeError(error) }],
-          isError: true,
-        };
+        return safeToolError(error);
       }
     },
   );
+}
+
+function registerAgentTools(server: McpServer, api: DebatidorApiClient) {
+  const agentIdInput = z
+    .string()
+    .trim()
+    .min(1)
+    .optional()
+    .describe('Optional debatidor-agent id. Omit to use the first connected agent for this user/workspace.');
+
+  server.registerTool(
+    'debatidor_agent_list',
+    {
+      title: 'List files through debatidor-agent',
+      description:
+        'List a project directory through the authenticated user’s connected debatidor-agent. Paths are relative to the agent project root; no browser extension is involved.',
+      inputSchema: z.object({
+        path: z.string().max(1000).optional().describe('Relative directory path. Omit for project root.'),
+        agentId: agentIdInput,
+      }),
+      outputSchema: agentResultSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ path, agentId }) => runAgentTool(api, {
+      agentId,
+      tool: 'fs.list',
+      path: path ?? '',
+    }),
+  );
+
+  server.registerTool(
+    'debatidor_agent_read',
+    {
+      title: 'Read a file through debatidor-agent',
+      description:
+        'Read a project file through the authenticated user’s connected debatidor-agent. The path must stay inside the configured project root.',
+      inputSchema: z.object({
+        path: z.string().trim().min(1).max(1000),
+        agentId: agentIdInput,
+      }),
+      outputSchema: agentResultSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ path, agentId }) => runAgentTool(api, {
+      agentId,
+      tool: 'fs.read',
+      path,
+    }),
+  );
+
+  server.registerTool(
+    'debatidor_agent_write',
+    {
+      title: 'Write a file through debatidor-agent',
+      description:
+        'Create or replace a project file through the authenticated user’s connected debatidor-agent. This changes the user’s local/remote project and should only be used when the requested edit is intended.',
+      inputSchema: z.object({
+        path: z.string().trim().min(1).max(1000),
+        content: z.string().max(500000),
+        agentId: agentIdInput,
+      }),
+      outputSchema: agentResultSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ path, content, agentId }) => runAgentTool(api, {
+      agentId,
+      tool: 'fs.write',
+      path,
+      content,
+    }),
+  );
+
+  server.registerTool(
+    'debatidor_agent_shell',
+    {
+      title: 'Run a shell command through debatidor-agent',
+      description:
+        'Run one non-interactive shell command in the connected debatidor-agent project. The runner denies shell execution unless the user explicitly started it with --shell-auto. Commands may modify the project or external systems.',
+      inputSchema: z.object({
+        command: z.string().trim().min(1).max(20000),
+        cwd: z.string().max(1000).optional().describe('Optional relative working directory inside the project root.'),
+        timeoutMs: z.number().int().min(1000).max(600000).optional(),
+        agentId: agentIdInput,
+      }),
+      outputSchema: agentResultSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ command, cwd, timeoutMs, agentId }) => runAgentTool(api, {
+      agentId,
+      tool: 'shell.run',
+      command,
+      cwd: cwd ?? '',
+      timeoutMs,
+    }),
+  );
+}
+
+async function runAgentTool(
+  api: DebatidorApiClient,
+  input: Parameters<DebatidorApiClient['executeAgent']>[0],
+) {
+  try {
+    const raw = await api.executeAgent(input);
+    const result = compactAgentResult(raw);
+    return {
+      content: [{ type: 'text' as const, text: formatAgentResult(result) }],
+      structuredContent: result,
+      ...(result.ok === false ? { isError: true } : {}),
+    };
+  } catch (error) {
+    return safeToolError(error);
+  }
+}
+
+function compactAgentResult(result: AgentExecutionResult): AgentExecutionResult & { truncated?: boolean } {
+  const maxChars = 40_000;
+  const maxEntries = 500;
+  let truncated = false;
+  let content = result.content;
+  let output = result.output;
+  let entries = result.entries;
+
+  if (typeof content === 'string' && content.length > maxChars) {
+    content = `${content.slice(0, maxChars)}\n…(truncated)`;
+    truncated = true;
+  }
+  if (typeof output === 'string' && output.length > maxChars) {
+    output = `${output.slice(0, maxChars)}\n…(truncated)`;
+    truncated = true;
+  }
+  if (Array.isArray(entries) && entries.length > maxEntries) {
+    entries = entries.slice(0, maxEntries);
+    truncated = true;
+  }
+
+  return {
+    tool: result.tool,
+    agentId: result.agentId ?? null,
+    ok: result.ok,
+    path: result.path,
+    bytes: result.bytes,
+    content,
+    entries,
+    error: result.error,
+    output,
+    exitCode: result.exitCode,
+    ...(truncated ? { truncated: true } : {}),
+  };
 }
 
 function formatLeadStatus(status: LeadStatus): string {
@@ -396,6 +563,31 @@ function formatQuickDebate(result: QuickDebateResult): string {
   ].join('\n');
 }
 
+function formatAgentResult(result: AgentExecutionResult & { truncated?: boolean }): string {
+  if (result.ok === false) {
+    const suffix = result.exitCode != null ? ` (exit ${result.exitCode})` : '';
+    const output = result.output ? `\n${result.output}` : '';
+    return `debatidor-agent ${result.tool} failed${suffix}: ${result.error ?? 'operation_failed'}${output}`;
+  }
+  if (result.tool === 'fs.list') {
+    return [`Listed ${result.path || '.'} through debatidor-agent.`, ...(result.entries ?? [])].join('\n');
+  }
+  if (result.tool === 'fs.read') {
+    return result.content ?? '';
+  }
+  if (result.tool === 'fs.write') {
+    return `Wrote ${result.path ?? 'file'} (${result.bytes ?? 0} bytes) through debatidor-agent.`;
+  }
+  return `Shell completed${result.exitCode != null ? ` (exit ${result.exitCode})` : ''}.\n${result.output ?? ''}`;
+}
+
+function safeToolError(error: unknown) {
+  return {
+    content: [{ type: 'text' as const, text: formatSafeError(error) }],
+    isError: true,
+  };
+}
+
 function formatSafeError(error: unknown): string {
   if (error instanceof DebatidorApiError) {
     if (error.status === 401 || error.status === 403) {
@@ -418,6 +610,9 @@ function formatSafeError(error: unknown): string {
     }
     if (error.code === 'vector_memory_query_required') {
       return 'A non-empty semantic search query is required.';
+    }
+    if (error.code?.startsWith('agent_')) {
+      return `Debatidor agent request was rejected: ${error.code}.`;
     }
     return `Debatidor API request failed (${error.status}).`;
   }
