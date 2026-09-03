@@ -1,0 +1,81 @@
+name: remote-smoke
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/remote-smoke.yml'
+      - 'src/http.ts'
+      - 'src/config.ts'
+      - 'src/server.ts'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/remote-smoke.yml'
+      - 'src/http.ts'
+      - 'src/config.ts'
+      - 'src/server.ts'
+  schedule:
+    - cron: '17 11 * * *'
+  workflow_dispatch:
+
+jobs:
+  production-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify public health
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error \
+            https://mcp.debatidor.com/health \
+            -o /tmp/health.json
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const body = JSON.parse(fs.readFileSync('/tmp/health.json', 'utf8'));
+          if (body.ok !== true) throw new Error('health.ok must be true');
+          if (body.service !== '@debatidor/mcp') throw new Error(`unexpected service: ${body.service}`);
+          if (body.publicBaseUrl !== 'https://mcp.debatidor.com') {
+            throw new Error(`unexpected publicBaseUrl: ${body.publicBaseUrl}`);
+          }
+          if (body.oauthEnabled !== true) throw new Error('production OAuth must be enabled');
+          console.log(JSON.stringify(body));
+          NODE
+
+      - name: Verify protected resource metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error \
+            https://mcp.debatidor.com/.well-known/oauth-protected-resource \
+            -o /tmp/protected-resource.json
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const body = JSON.parse(fs.readFileSync('/tmp/protected-resource.json', 'utf8'));
+          if (body.resource !== 'https://mcp.debatidor.com') {
+            throw new Error(`unexpected resource: ${body.resource}`);
+          }
+          if (!Array.isArray(body.authorization_servers) || body.authorization_servers.length < 1) {
+            throw new Error('authorization_servers missing');
+          }
+          if (!Array.isArray(body.scopes_supported) || !body.scopes_supported.includes('debatidor:read')) {
+            throw new Error('debatidor:read scope missing');
+          }
+          console.log(JSON.stringify(body));
+          NODE
+
+      - name: Verify unauthenticated MCP challenge
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$({ curl --silent --show-error \
+            -D /tmp/mcp-headers.txt \
+            -o /tmp/mcp-body.json \
+            -w '%{http_code}' \
+            -H 'content-type: application/json' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"debatidor-remote-smoke","version":"1.0.0"}}}' \
+            https://mcp.debatidor.com/mcp; } 2>/tmp/curl-error.txt)"
+          test "$status" = '401'
+          grep -qi '^www-authenticate: Bearer ' /tmp/mcp-headers.txt
+          grep -qi 'resource_metadata="https://mcp.debatidor.com/.well-known/oauth-protected-resource"' /tmp/mcp-headers.txt
+          cat /tmp/mcp-body.json
