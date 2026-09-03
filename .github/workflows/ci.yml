@@ -29,5 +29,37 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Official MCP Inspector smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBATIDOR_MCP_HOST=127.0.0.1
+          export DEBATIDOR_MCP_PORT=3002
+          export DEBATIDOR_MCP_PUBLIC_BASE_URL=http://127.0.0.1:3002
+          export DEBATIDOR_MCP_OAUTH_ENABLED=false
+
+          node dist/src/http.js >/tmp/debatidor-mcp.log 2>&1 &
+          mcp_pid=$!
+          trap 'kill "$mcp_pid" 2>/dev/null || true; cat /tmp/debatidor-mcp.log || true' EXIT
+
+          for _ in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3002/health >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:3002/health >/dev/null
+
+          npx -y @modelcontextprotocol/inspector@latest --cli \
+            http://127.0.0.1:3002/mcp --transport http \
+            --method tools/list --format json | tee /tmp/inspector-tools.json
+          grep -q 'debatidor_ping' /tmp/inspector-tools.json
+
+          npx -y @modelcontextprotocol/inspector@latest --cli \
+            http://127.0.0.1:3002/mcp --transport http \
+            --method tools/call --tool-name debatidor_ping --format json \
+            | tee /tmp/inspector-ping.json
+          grep -q 'debatidor-mcp' /tmp/inspector-ping.json
+
       - name: Docker build
         run: docker build -t debatidor-mcp:ci .
