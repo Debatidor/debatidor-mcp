@@ -2,50 +2,49 @@
 
 Servidor remoto oficial de **Model Context Protocol (MCP)** para Debatidor.
 
-`debatidor-mcp` es un adaptador fino entre clientes MCP (ChatGPT, Claude, Gemini, IDEs y agentes compatibles) y `debatidor-back`. La autoridad de identidad, permisos, Arena, Lead, memoria y datos permanece en el backend; la ejecución de filesystem/shell permanece en `debatidor-agent`.
+`debatidor-mcp` es un adaptador fino entre clientes MCP (ChatGPT, Claude, IDEs y otros hosts compatibles) y `debatidor-back`. La autoridad de identidad, permisos, Arena, Lead, memoria y datos permanece en el backend; filesystem/shell se ejecutan exclusivamente en `debatidor-agent`.
 
 ## Arquitectura
 
 ```text
-ChatGPT / Claude / Gemini / IDEs
-              |
-        Streamable HTTP
-              |
-   https://mcp.debatidor.com/mcp
-              |
-        debatidor-mcp
-              |
-        OAuth bearer
-              |
-        debatidor-back
-          |         |
-     Arena/PAL   /agent WS
-                    |
-             debatidor-agent
-                    |
-             proyecto / shell
+ChatGPT / Claude / IDEs
+          |
+    Streamable HTTP
+          |
+https://mcp.debatidor.com/mcp
+          |
+    debatidor-mcp
+          |
+     OAuth bearer
+          |
+    debatidor-back
+      |         |
+ Arena/PAL   /agent WS
+                |
+         debatidor-agent
+                |
+         proyecto / shell
 ```
 
-El endpoint remoto es el camino principal. `stdio` se conserva únicamente para clientes locales/IDE y debugging.
+El endpoint remoto es el camino de producto. `stdio` se conserva para clientes locales/IDE y debugging.
 
 ## Estado actual
 
 Versión `0.7.0`:
 
-- MCP TypeScript SDK v2, compatible con la revisión `2026-07-28`;
+- MCP TypeScript SDK v2, revisión objetivo `2026-07-28`;
 - Streamable HTTP stateless en `/mcp`;
-- Docker + healthcheck `/health` y `/healthz`;
+- Docker + `/health` y `/healthz`;
 - Protected Resource Metadata en `/.well-known/oauth-protected-resource`;
-- OAuth 2.1 requerido en el endpoint HTTPS de producción;
-- `debatidor_ping` para comprobación del servicio;
-- `debatidor_get_lead_status` para Arenas `LEAD` del workspace autenticado;
-- `debatidor_search_context` para búsqueda semántica read-only;
-- `debatidor_index_context` para materializar explícitamente mensajes persistidos como memoria semántica;
-- `debatidor_quick_debate` para inyectar una intervención y delegar la ejecución al runtime existente de Arena;
-- `debatidor_agent_list`, `debatidor_agent_read`, `debatidor_agent_write` y `debatidor_agent_shell` para operar directamente el proyecto conectado por `debatidor-agent`, sin extensión DOM;
-- bridge API-key legacy únicamente para dogfooding local/privado y mutuamente excluyente con OAuth.
+- OAuth requerido en producción;
+- ChatGPT y Claude validados como clientes reales contra el mismo endpoint;
+- `debatidor_ping` y `debatidor_get_lead_status`;
+- `debatidor_search_context` / `debatidor_index_context` como superficie de memoria heredada;
+- `debatidor_quick_debate` para inyectar una intervención en una Arena existente;
+- `debatidor_agent_list/read/write/shell` para operar un proyecto conectado por `debatidor-agent` sin DOM;
+- bridge API-key legacy solo para dogfooding local/privado.
 
-El bootstrap `0.2.0` fue validado desde ChatGPT real; `0.3.0` añadió account linking user-scoped; `0.4.0` incorporó búsqueda semántica; `0.5.0` separó explícitamente el coste/escritura de indexación de la consulta read-only; `0.6.0` añadió la primera acción de orquestación sin reimplementar el runtime en MCP; `0.7.0` conecta clientes MCP directamente con las capacidades locales del agent.
+La implementación actual de vector-memory todavía usa OpenAI BYOK para embeddings. **Eso es deuda transitoria, no el contrato futuro del producto.** ADR-0011/P11 fijan que historial/contexto/memoria serán first-party Debatidor y no dependerán de créditos externos del usuario. P7 únicamente transporta las tools.
 
 ## Desarrollo local
 
@@ -56,7 +55,7 @@ npm test
 npm run build
 ```
 
-Para probar HTTP local sin OAuth remoto:
+Servidor HTTP local sin OAuth:
 
 ```bash
 DEBATIDOR_MCP_HOST=127.0.0.1 \
@@ -65,19 +64,29 @@ DEBATIDOR_MCP_OAUTH_ENABLED=false \
 npm run dev:http
 ```
 
-Inspector:
+Inspector oficial:
 
 ```bash
 npx @modelcontextprotocol/inspector@latest
 ```
 
+El CI levanta el build local y usa el Inspector para ejecutar `tools/list` y `debatidor_ping`.
+
 ## Producción
 
-Endpoint canónico:
+Endpoint MCP:
 
 ```text
 https://mcp.debatidor.com/mcp
 ```
+
+Probe público:
+
+```text
+https://mcp.debatidor.com/health
+```
+
+En producción `/mcp` está protegido por OAuth. No debe describirse `debatidor_ping` como una ruta HTTP pública; la reachability sin autenticación vive en `/health`.
 
 Variables recomendadas:
 
@@ -103,7 +112,7 @@ El MCP actúa como OAuth Resource Server y `debatidor-back` como Authorization S
 GET /.well-known/oauth-protected-resource
         -> authorization_servers: https://api.debatidor.com
 
-ChatGPT
+cliente MCP
   -> Authorization Code + PKCE S256
   -> CIMD client identity
   -> consentimiento Debatidor
@@ -111,13 +120,13 @@ ChatGPT
   -> Authorization: Bearer <token> en /mcp
 ```
 
-El access token se valida contra el backend antes de crear las tools user-scoped. El MCP nunca usa una API key global del contenedor para representar usuarios.
+El bearer se valida contra el backend antes de crear las tools user-scoped. El MCP nunca representa a todos los usuarios con una API key global del contenedor.
 
 ## Tools
 
 ### `debatidor_ping`
 
-Comprueba versión/protocolo/reachability. No devuelve datos privados.
+Comprueba versión/protocolo/reachability dentro de una sesión MCP válida. No devuelve datos privados.
 
 ### `debatidor_get_lead_status`
 
@@ -125,43 +134,47 @@ Lee Arenas `LEAD` visibles en el workspace del principal OAuth. Con `debateId`, 
 
 ### `debatidor_search_context`
 
-Busca semánticamente recuerdos `MESSAGE` y `CONCLUSION` del workspace autenticado. Admite `debateId`, filtro de `kinds` y hasta 10 resultados por llamada MCP.
+Búsqueda read-only sobre la memoria del workspace. El contrato MCP no conoce ni debe conocer el proveedor de embeddings.
 
-La consulta es **read-only**. El backend genera el embedding de la query con la llave OpenAI BYOK del usuario y ejecuta la búsqueda pgvector con `workspace_id` como primera cláusula del `WHERE`; ni la llave ni los embeddings se exponen al MCP.
+**Estado transitorio 0.7.0:** el backend actual todavía genera embeddings con OpenAI BYOK. P11 reemplazará ese acoplamiento por memoria/retrieval first-party administrado por Debatidor.
 
 ### `debatidor_index_context`
 
-Materializa hasta 50 mensajes persistidos de una Arena como recuerdos `MESSAGE`. Es una acción explícita porque genera escrituras derivadas y uso del proveedor de embeddings; no se oculta dentro de `debatidor_search_context`.
+Reindexa/materializa mensajes persistidos de una Arena. Es una write no destructiva e idempotente por fuente.
 
-- requiere que la Arena pertenezca al workspace OAuth;
-- usa la llave OpenAI BYOK del usuario;
-- es no destructiva e idempotente por mensaje fuente;
-- un mensaje sin cambios no vuelve a generar embeddings;
-- un mensaje modificado actualiza la misma memoria derivada.
-
-El uso de embeddings puede generar consumo/coste en la cuenta del proveedor configurada por el usuario.
+**Estado transitorio 0.7.0:** el backend actual todavía usa OpenAI BYOK para los embeddings. En P11 esta tool queda como mantenimiento/backfill; el flujo normal de memoria será automático y first-party.
 
 ### `debatidor_quick_debate`
 
-Inyecta una intervención en una Arena **ya existente** y delega el trabajo al mismo runtime que usa el canal web/CLI. No crea un segundo orquestador dentro de MCP.
+Inyecta una intervención en una Arena **ya existente** y reutiliza el runtime real de Arena. No crea un segundo orquestador dentro del MCP.
 
-Inputs principales:
+Inputs:
 
 - `debateId`: Arena del workspace autenticado;
-- `prompt`: intervención que se persiste como mensaje humano;
-- `mode`: `web`, `api` o `both` (default `both`);
-- `connectionId`: opcional para dirigir la parte web a un `BROWSER_DOM` concreto.
+- `prompt`: intervención a persistir/despachar;
+- `mode`: `web`, `api` o `both`;
+- `connectionId`: opcional para dirigir la parte DOM.
 
-La tool es una write no destructiva, pero **no idempotente**: repetirla persiste otra intervención y puede volver a generar consumo de proveedores. La respuesta confirma aceptación/dispatch; los participantes web y API completan sus turnos de forma asíncrona dentro del runtime de Arena y sus `turn.completed` siguen persistiendo por las rutas existentes.
+Es no idempotente: repetirla genera otra intervención. `mode=api` puede consumir proveedores BYOK; `mode=web` puede usar un participante web conectado por la extensión sin consumir una API BYOK.
+
+El backend tiene cobertura de integración del camino:
+
+```text
+quickDebate
+  -> agent.say
+  -> persistHumanMessage
+  -> Arena/PAL runtime
+  -> persistCompletedTurn
+```
+
+La aceptación final de P7 todavía exige un `quick_debate` desde un cliente MCP real y confirmar el turno persistido.
 
 ## Proyecto conectado por `debatidor-agent`
-
-La versión `0.7.0` añade el camino nativo para que un cliente MCP maneje el proyecto conectado del usuario sin convertir un chat web en un parser de bloques JSON:
 
 ```text
 ChatGPT / Claude
       |
-  tool MCP
+   tool MCP
       |
 debatidor-mcp
       |
@@ -175,57 +188,93 @@ filesystem / shell
       |
  resultado MCP
       |
-mismo turno del cliente
+mismo turno
 ```
 
-Arranca el agent desde el proyecto que quieres exponer:
+Arranca el agent desde la raíz del proyecto:
 
 ```bash
 cd mi-proyecto
 debatidor connect --remote
 ```
 
-Las operaciones de filesystem quedan confinadas al `cwd` del agent por `fs-guard`. El backend rechaza además rutas absolutas y traversal (`..`) antes de enviarlas al runner; el agent vuelve a validarlas de forma portable para rutas Unix/Windows.
+Las rutas quedan confinadas al `cwd` en backend y agent.
 
 ### `debatidor_agent_list`
 
-Lista un directorio relativo al proyecto. Read-only e idempotente.
+Lista un directorio relativo. Read-only e idempotente.
 
 ### `debatidor_agent_read`
 
-Lee un archivo relativo al proyecto. Read-only e idempotente.
+Lee un archivo relativo. Read-only e idempotente.
 
 ### `debatidor_agent_write`
 
-Crea o reemplaza un archivo relativo al proyecto. Es una acción destructiva en el sentido MCP porque modifica disco; repetir exactamente el mismo contenido es idempotente.
+Crea/reemplaza un archivo relativo. Modifica disco y se marca destructiva.
 
 ### `debatidor_agent_shell`
 
-Ejecuta **un comando no interactivo** en el proyecto. Se marca destructiva y no idempotente porque un comando puede modificar archivos, Git o sistemas externos.
+Ejecuta un comando no interactivo. Shell headless está **apagado por defecto**.
 
-El runner headless **deniega shell por defecto**. Para habilitarla conscientemente:
+Para habilitarlo conscientemente:
 
 ```bash
 debatidor connect --remote --shell-auto
 ```
 
-Sin `--shell-auto`, `debatidor_agent_shell` devuelve `denied_headless_shell_disabled`; list/read/write siguen disponibles. `cwd`, cuando se usa para shell, también debe ser relativo y permanecer dentro de la raíz del proyecto.
+Sin `--shell-auto`, devuelve `denied_headless_shell_disabled`.
 
-Si hay varios agents conectados bajo el mismo usuario/workspace, las tools aceptan `agentId` opcional. Si se omite, el backend usa el primer agent conectado del principal autenticado.
+Las tools aceptan `agentId` opcional. La evolución P9/ADR-0012 exige que targets explícitos fallen cerrado si el agent no está conectado y que reconexiones reemplacen registros stale.
 
-Los outputs grandes de archivo/shell se acotan antes de volver al contexto MCP para evitar inflar innecesariamente la conversación.
+## Clientes validados
 
-## ChatGPT, Claude y Gemini
+### ChatGPT
 
-El core no contiene adapters específicos por proveedor. Todos deben consumir el mismo MCP remoto.
+Primer cliente de aceptación. Validado con OAuth, lectura de Arena y control de repo por `MCP → backend → agent` incluyendo filesystem, shell, Git y una tarea de coding real.
 
-- ChatGPT: Developer Mode / MCP app; primer cliente de aceptación.
-- Claude: Custom Connector remote MCP; segundo cliente de portabilidad previsto.
-- Gemini y otros hosts: mismo endpoint cuando su producto soporte remote MCP compatible.
+### Claude
 
-CIMD es la ruta principal de identificación OAuth. DCR se añadirá solo como fallback si un segundo cliente objetivo lo requiere.
+Segundo cliente real de portabilidad. Validado contra **el mismo endpoint MCP**, con OAuth/CIMD y operaciones `list/read/shell` sobre el repo conectado.
 
-La dirección nativa nueva es **cliente MCP → Debatidor → agent → resultado al mismo turno**. El servidor MCP no intenta empujar espontáneamente mensajes desde el CLI hacia una conversación web; para ese sentido sigue existiendo la extensión DOM o un runtime de modelo controlado por API.
+No existe un adapter MCP específico para Anthropic.
+
+### Gemini y otros hosts
+
+Deben consumir el mismo endpoint cuando el host ofrezca remote MCP compatible. Gemini/DCR es compatibilidad posterior y no bloquea P7 porque la portabilidad ya fue demostrada con Claude.
+
+## Operación y smoke tests
+
+### CI local del protocolo
+
+Cada PR/push ejecuta typecheck/tests/build, levanta el servidor y usa el **MCP Inspector oficial** para:
+
+```text
+tools/list
+  -> descubre debatidor_ping
+
+tools/call debatidor_ping
+  -> respuesta válida
+```
+
+### Remote production smoke
+
+`.github/workflows/remote-smoke.yml` se ejecuta en cambios relevantes, manualmente y de forma programada. Verifica sin credenciales de usuario:
+
+- `/health` devuelve servicio/version/OAuth esperados;
+- Protected Resource Metadata apunta al Authorization Server correcto;
+- `/mcp` sin bearer devuelve `401` + `WWW-Authenticate` con `resource_metadata` correcto.
+
+No almacena tokens humanos ni automatiza consentimiento OAuth.
+
+## Dirección del protocolo
+
+La dirección nativa es:
+
+```text
+cliente MCP -> Debatidor -> agent/Arena -> resultado al mismo cliente
+```
+
+Un servidor MCP no se usa para despertar espontáneamente una conversación web a partir de un mensaje iniciado por el CLI. Para `CLI -> chat web` sigue existiendo la extensión DOM o un runtime de modelo controlado por API.
 
 ## stdio / bridge legacy
 
@@ -243,13 +292,22 @@ Nunca uses este modo en `mcp.debatidor.com`.
 ## Seguridad
 
 - No hay una API key global de usuario embebida en producción.
-- El MCP valida bearer tokens antes de exponer tools user-scoped.
-- El backend valida audience/resource/scope y conserva autoridad de tenant/ownership.
-- Snapshot, quick debate, búsqueda, indexación y ejecución del agent permanecen user/workspace-scoped.
-- Los resultados `agent.file_result` solo resuelven tareas pendientes del mismo `userId + workspaceId`.
-- Rutas de filesystem se validan en backend y nuevamente en `debatidor-agent`, incluyendo semántica portable Unix/Windows.
-- Shell remota queda apagada salvo opt-in explícito `--shell-auto`.
+- El MCP valida bearer antes de exponer datos/tools user-scoped.
+- Backend conserva autoridad de audience/resource/scope/tenant/ownership.
+- Quick debate, memoria y agent execution permanecen workspace-scoped.
+- `agent.file_result` solo resuelve tareas del mismo `userId + workspaceId`.
+- Filesystem se valida en backend y agent, incluyendo rutas Unix/Windows.
+- Shell remota requiere `--shell-auto`.
 - Las llaves BYOK nunca cruzan hacia el MCP.
-- Authorization codes y refresh tokens se almacenan hasheados; los refresh tokens rotan.
+- Authorization codes y refresh tokens se almacenan hasheados; refresh rota.
 - No loguear tokens, códigos OAuth, API keys ni payloads sensibles completos.
-- Las tools con efectos deben declarar annotations MCP acordes a su comportamiento y respetar autorización/confirmación del cliente.
+- Las annotations MCP deben reflejar side effects reales.
+
+## P7 — gates restantes
+
+La infraestructura/protocolo están verificados. Antes de declarar P7 cerrado faltan únicamente dos pruebas de producto con identidades reales:
+
+1. ChatGPT autenticado ejecuta `debatidor_quick_debate` y se confirma un `turn.completed` persistido.
+2. Dos users/workspaces distintos demuestran aislamiento efectivo entre debates/agents.
+
+La memoria first-party se implementa en P11 y no es un gate de cierre de P7.
