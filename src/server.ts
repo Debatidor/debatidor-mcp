@@ -4,13 +4,14 @@ import {
   DebatidorApiClient,
   DebatidorApiError,
   type AgentExecutionResult,
-  type ContextHit,
+  type ContextSearchResult,
   type IndexDebateContextResult,
   type LeadStatus,
   type QuickDebateResult,
 } from './debatidor-api.js';
+import { contextSearchSchema, contextIndexSchema, contextKindSchema } from './context-contracts.js';
 
-export const SERVER_VERSION = '0.7.2';
+export const SERVER_VERSION = '0.7.3';
 export const PROTOCOL_VERSION = '2026-07-28';
 
 export type DebatidorServerOptions = {
@@ -42,30 +43,6 @@ const leadStatusSchema = z.object({
   activeCount: z.number().int().nonnegative(),
   debates: z.array(debateSchema),
   participants: z.array(participantSchema).optional(),
-});
-
-const contextHitSchema = z.object({
-  id: z.string(),
-  debateId: z.string().nullable(),
-  kind: z.enum(['MESSAGE', 'CONCLUSION']),
-  content: z.string(),
-  similarity: z.number(),
-  createdAt: z.string().optional(),
-});
-
-const contextSearchSchema = z.object({
-  query: z.string(),
-  hitCount: z.number().int().nonnegative(),
-  hits: z.array(contextHitSchema),
-});
-
-const contextIndexSchema = z.object({
-  debateId: z.string(),
-  scanned: z.number().int().nonnegative(),
-  indexed: z.number().int().nonnegative(),
-  unchanged: z.number().int().nonnegative(),
-  empty: z.number().int().nonnegative(),
-  cappedAt: z.number().int().positive(),
 });
 
 const quickDebateSchema = z.object({
@@ -195,31 +172,31 @@ function registerSearchContextTool(server: McpServer, api: DebatidorApiClient) {
     {
       title: 'Search Debatidor context',
       description:
-        'Semantically search long-term MESSAGE and CONCLUSION memories in the authenticated Debatidor workspace. Optionally scope the search to one debate. This is read-only and never searches another workspace.',
+        'Search context stored by Debatidor in the authenticated workspace. Defaults to MESSAGE and CONCLUSION for compatibility; explicitly request FACT, DECISION or SUMMARY to include those kinds. Optionally scope results to one debate. Results identify their retrieval method, score and source provenance. Text search remains available when semantic retrieval is unavailable. This is read-only; indexing is not a prerequisite.',
       inputSchema: z.object({
         query: z
           .string()
           .trim()
           .min(1)
           .max(2000)
-          .describe('Natural-language semantic query to search in Debatidor long-term memory.'),
+          .describe('Query to search context stored by Debatidor.'),
         debateId: z
           .string()
           .min(1)
           .optional()
           .describe('Optional debate id to restrict results to one arena.'),
         kinds: z
-          .array(z.enum(['MESSAGE', 'CONCLUSION']))
-          .max(2)
+          .array(contextKindSchema)
+          .max(5)
           .optional()
-          .describe('Optional memory kinds. Omit to search both messages and conclusions.'),
+          .describe('Optional memory kinds: MESSAGE, CONCLUSION, FACT, DECISION, SUMMARY. Omitted or empty uses MESSAGE and CONCLUSION; request newer kinds explicitly.'),
         limit: z
           .number()
           .int()
           .min(1)
           .max(10)
           .optional()
-          .describe('Maximum number of semantic matches. Defaults to the backend limit.'),
+          .describe('Maximum number of context matches. Defaults to the backend limit.'),
       }),
       outputSchema: contextSearchSchema,
       annotations: {
@@ -231,14 +208,14 @@ function registerSearchContextTool(server: McpServer, api: DebatidorApiClient) {
     },
     async ({ query, debateId, kinds, limit }) => {
       try {
-        const hits = await api.searchContext({ query, debateId, kinds, limit });
-        const result = { query, hitCount: hits.length, hits };
+        const context = await api.searchContext({ query, debateId, kinds, limit });
+        const result = { query, hitCount: context.hits.length, ...context };
         return {
-          content: [{ type: 'text', text: formatContextSearch(query, hits) }],
+          content: [{ type: 'text', text: formatContextSearch(query, context) }],
           structuredContent: result,
         };
       } catch (error) {
-        return safeToolError(error);
+        return safeContextError(error);
       }
     },
   );
@@ -250,7 +227,7 @@ function registerIndexContextTool(server: McpServer, api: DebatidorApiClient) {
     {
       title: 'Index Debatidor debate context',
       description:
-        'Materialize persisted messages from one authenticated Debatidor arena into semantic long-term memory. This writes derived memory rows and uses the user OpenAI BYOK for embeddings, so it can incur provider usage. Re-running unchanged messages is idempotent and does not re-embed them.',
+        'Explicit maintenance: materialize or refresh context from persisted messages in one authenticated Debatidor arena. Normal context search does not require this tool. This writes Debatidor-managed derived memory; unchanged sources are skipped idempotently.',
       inputSchema: z.object({
         debateId: z
           .string()
@@ -270,7 +247,7 @@ function registerIndexContextTool(server: McpServer, api: DebatidorApiClient) {
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: true,
-        openWorldHint: true,
+        openWorldHint: false,
       },
     },
     async ({ debateId, limit }) => {
@@ -281,7 +258,7 @@ function registerIndexContextTool(server: McpServer, api: DebatidorApiClient) {
           structuredContent: result,
         };
       } catch (error) {
-        return safeToolError(error);
+        return safeContextError(error);
       }
     },
   );
@@ -531,16 +508,18 @@ function formatLeadStatus(status: LeadStatus): string {
   return [`Active LEAD arenas: ${status.activeCount}`, ...lines].join('\n');
 }
 
-function formatContextSearch(query: string, hits: ContextHit[]): string {
-  if (hits.length === 0) {
-    return `No long-term Debatidor context matched: ${query}`;
+function formatContextSearch(query: string, result: ContextSearchResult): string {
+  const status = `Retrieval: ${result.retrieval.method}. Semantic retrieval: ${result.retrieval.semanticStatus}.`;
+  const partial = result.partial ? 'Results are partial.' : '';
+  if (result.hits.length === 0) {
+    return [status, partial, `No Debatidor context matched: ${query}`].filter(Boolean).join('\n');
   }
 
-  const lines = hits.map((hit) => {
+  const lines = result.hits.map((hit) => {
     const debate = hit.debateId ? ` · debate ${hit.debateId}` : '';
-    return `- [${hit.kind}] similarity ${hit.similarity.toFixed(3)}${debate}\n  ${hit.content}`;
+    return `- [${hit.kind}] text relevance score ${hit.score.toFixed(3)}${debate}\n  Source: ${hit.sourceId} · revision ${hit.provenance.sourceRevision}\n  ${hit.content}`;
   });
-  return [`Semantic context matches: ${hits.length}`, ...lines].join('\n');
+  return [status, partial, `Context matches: ${result.hits.length}`, ...lines].filter(Boolean).join('\n');
 }
 
 function formatContextIndex(result: IndexDebateContextResult): string {
@@ -588,6 +567,18 @@ function safeToolError(error: unknown) {
   };
 }
 
+function safeContextError(error: unknown) {
+  if (error instanceof DebatidorApiError &&
+      (error.code === 'provider_key_not_configured' || error.code === 'embeddings_key_required')) {
+    return {
+      content: [{ type: 'text' as const,
+        text: 'The Debatidor memory backend is not ready. Memory is managed by Debatidor and does not require an external provider key.' }],
+      isError: true,
+    };
+  }
+  return safeToolError(error);
+}
+
 function formatSafeError(error: unknown): string {
   if (error instanceof DebatidorApiError) {
     if (error.status === 401 || error.status === 403) {
@@ -611,14 +602,14 @@ function formatSafeError(error: unknown): string {
     if (error.code === 'quick_debate_dispatch_failed') {
       return 'The turn could not be dispatched. Inspect the Arena and extension before trying again; do not automatically repeat the request.';
     }
-    if (error.code === 'vector_memory_debate_not_found') {
+    if (error.code === 'vector_memory_debate_not_found' || error.code === 'context_debate_not_found') {
       return 'That debate is not available in the authenticated Debatidor workspace.';
     }
-    if (error.code === 'provider_key_not_configured' || error.code === 'embeddings_key_required') {
-      return 'Semantic memory needs an OpenAI provider key configured in Debatidor Integrations so the backend can generate embeddings.';
+    if (error.code === 'context_response_invalid' || error.code === 'upstream_response_invalid') {
+      return 'Debatidor returned an invalid response. The request could not be completed; no result was inferred.';
     }
-    if (error.code === 'vector_memory_query_required') {
-      return 'A non-empty semantic search query is required.';
+    if (error.code === 'vector_memory_query_required' || error.code === 'context_query_required') {
+      return 'A non-empty context search query is required.';
     }
     if (error.code?.startsWith('agent_')) {
       return `Debatidor agent request was rejected: ${error.code}.`;

@@ -30,7 +30,7 @@ El endpoint remoto es el camino de producto. `stdio` se conserva para clientes l
 
 ## Estado actual
 
-Versión `0.7.2`:
+Versión `0.7.3`:
 
 - MCP TypeScript SDK v2, revisión objetivo `2026-07-28`;
 - Streamable HTTP stateless en `/mcp`;
@@ -39,7 +39,7 @@ Versión `0.7.2`:
 - OAuth requerido en producción;
 - ChatGPT y Claude validados como clientes reales contra el mismo endpoint;
 - `debatidor_ping` y `debatidor_get_lead_status`;
-- `debatidor_search_context` / `debatidor_index_context` como superficie de memoria heredada;
+- `debatidor_search_context` / `debatidor_index_context` sobre Context Service, la memoria propia de Debatidor;
 - `debatidor_quick_debate` para inyectar una intervención en una Arena existente;
 - `debatidor_agent_list/read/write/shell` para operar un proyecto conectado por `debatidor-agent` sin DOM;
 - bridge API-key legacy solo para dogfooding local/privado.
@@ -48,7 +48,7 @@ Para `quick_debate` en modo web, usar la extensión 0.4.7 o posterior, vincular 
 
 Las nuevas instrucciones de esta herramienta aparecen como **MCP** en la transcripción. El cliente externo no se identifica como ChatGPT o Claude a partir de su texto; su conversación y confirmación fuera de la llamada no se copian a la Arena. Los turnos web de `quick_debate` no habilitan herramientas de archivos o shell; las sesiones del agente y las herramientas MCP `debatidor_agent_*` mantienen sus propios permisos.
 
-La implementación actual de vector-memory todavía usa OpenAI BYOK para embeddings. **Eso es deuda transitoria, no el contrato futuro del producto.** ADR-0011/P11 fijan que historial/contexto/memoria serán first-party Debatidor y no dependerán de créditos externos del usuario. P7 únicamente transporta las tools.
+La memoria se consulta mediante Context Service y funciona sin claves ni créditos de proveedores externos. Esta versión identifica la recuperación textual y comunica que el motor semántico está indisponible. Cada resultado incluye relevancia y procedencia; no presenta el ranking textual como similitud semántica. Requiere el backend P11 con `/context/search` y `/context/index-debate`.
 
 ## Desarrollo local
 
@@ -138,15 +138,26 @@ Lee Arenas `LEAD` visibles en el workspace del principal OAuth. Con `debateId`, 
 
 ### `debatidor_search_context`
 
-Búsqueda read-only sobre la memoria del workspace. El contrato MCP no conoce ni debe conocer el proveedor de embeddings.
+Búsqueda read-only del contexto del workspace autenticado, opcionalmente limitada a una Arena. Conserva los inputs `query` (requerido), `debateId`, `kinds` y `limit`; no requiere ejecutar previamente la tool de indexación.
 
-**Estado transitorio 0.7.x:** el backend actual todavía genera embeddings con OpenAI BYOK. P11 reemplazará ese acoplamiento por memoria/retrieval first-party administrado por Debatidor.
+`kinds` acepta `MESSAGE`, `CONCLUSION`, `FACT`, `DECISION` y `SUMMARY`. Para mantener las consultas de clientes anteriores, si se omite o se envía `[]`, el MCP manda explícitamente `['MESSAGE', 'CONCLUSION']` al backend. Los tipos nuevos se incluyen solo al solicitarlos: por ejemplo, `kinds: ['FACT', 'DECISION', 'SUMMARY']`; para los cinco tipos, envía los cinco valores. Los clientes que pidan tipos nuevos deben aceptar esos valores en los resultados.
+
+El MCP consume `POST /context/search`, el mismo Context Service del Hub. Conserva `query`, `hitCount`, `hits` y los campos previos de cada hit. Añade:
+
+- `score`: relevancia textual, sin prometer una escala de similitud;
+- `retrievalMethod: "text"` y `semanticSimilarity: null`;
+- `sourceId` y `provenance`: `messageId` (nullable), `sourceRevision` (entero), `originType` y `originId`;
+- `retrieval: { method: "text", semanticStatus: "unavailable" }` y `partial` a nivel de respuesta.
+
+El campo requerido heredado `similarity` se mantiene numérico con valor `0` para compatibilidad. Es un marcador de recuperación textual, **no una similitud coseno medida**. El texto de la tool usa `score` y comunica el método, la indisponibilidad semántica y si los resultados son parciales.
+
+Una respuesta malformada del backend devuelve `isError: true`; nunca se transforma en una lista vacía ni provoca una indexación o un fallback automático al backend anterior. Una búsqueda válida sin coincidencias devuelve `hits: []` junto con sus metadatos. El endpoint backend heredado `/vector-memory/search` conserva su array para otros consumidores; este MCP utiliza el envelope canónico de Context Service.
 
 ### `debatidor_index_context`
 
-Reindexa/materializa mensajes persistidos de una Arena. Es una write no destructiva e idempotente por fuente.
+Mantenimiento explícito para materializar o refrescar contexto desde mensajes persistidos de una Arena. Es una escritura no destructiva e idempotente por fuente; no es un requisito de la búsqueda normal y no consume una clave externa del usuario.
 
-**Estado transitorio 0.7.x:** el backend actual todavía usa OpenAI BYOK para los embeddings. En P11 esta tool queda como mantenimiento/backfill; el flujo normal de memoria será automático y first-party.
+Usa `POST /context/index-debate`, alias del mantenimiento heredado `/vector-memory/index-debate`. Conserva `debateId` requerido, `limit` opcional (máximo 50) y el resultado `{ debateId, scanned, indexed, unchanged, empty, cappedAt }`. `indexed` cuenta materialización textual completada; `unchanged` cuenta fuentes cuya revisión permanece intacta. No indica embeddings creados ni trabajo meramente encolado.
 
 ### `debatidor_quick_debate`
 
