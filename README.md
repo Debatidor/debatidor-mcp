@@ -30,7 +30,7 @@ El endpoint remoto es el camino de producto. `stdio` se conserva para clientes l
 
 ## Estado actual
 
-Versión `0.7.3`:
+Versión `0.7.5`:
 
 - MCP TypeScript SDK v2, revisión objetivo `2026-07-28`;
 - Streamable HTTP stateless en `/mcp`;
@@ -40,6 +40,7 @@ Versión `0.7.3`:
 - ChatGPT y Claude validados como clientes reales contra el mismo endpoint;
 - `debatidor_ping` y `debatidor_get_lead_status`;
 - `debatidor_search_context` / `debatidor_index_context` sobre Context Service, la memoria propia de Debatidor;
+- lectura completa, fuentes, exportación paginada, borrado derivado y política de memoria mediante las herramientas `context`;
 - `debatidor_quick_debate` para inyectar una intervención en una Arena existente;
 - `debatidor_agent_list/read/write/shell` para operar un proyecto conectado por `debatidor-agent` sin DOM;
 - bridge API-key legacy solo para dogfooding local/privado.
@@ -48,7 +49,7 @@ Para `quick_debate` en modo web, usar la extensión 0.4.7 o posterior, vincular 
 
 Las nuevas instrucciones de esta herramienta aparecen como **MCP** en la transcripción. El cliente externo no se identifica como ChatGPT o Claude a partir de su texto; su conversación y confirmación fuera de la llamada no se copian a la Arena. Los turnos web de `quick_debate` no habilitan herramientas de archivos o shell; las sesiones del agente y las herramientas MCP `debatidor_agent_*` mantienen sus propios permisos.
 
-La memoria se consulta mediante Context Service y funciona sin claves ni créditos de proveedores externos. Esta versión identifica la recuperación textual y comunica que el motor semántico está indisponible. Cada resultado incluye relevancia y procedencia; no presenta el ranking textual como similitud semántica. Requiere el backend P11 con `/context/search` y `/context/index-debate`.
+La memoria se consulta mediante Context Service y funciona sin claves ni créditos de proveedores externos. Esta versión admite recuperación textual e híbrida administrada, con disponibilidad explícita y fallback textual. Cada resultado incluye relevancia y procedencia; el ranking no se presenta como similitud coseno. Las herramientas de exportación y borrado requieren el backend P11 de gobernanza con las rutas `/context/items`, `/context/sources`, `/context/exports`, `/context/deletions` y `/context/governance`; no simulan éxito si el backend todavía no las ofrece.
 
 ## Desarrollo local
 
@@ -163,6 +164,38 @@ Mantenimiento explícito para materializar o refrescar contexto desde mensajes p
 
 Usa `POST /context/index-debate`, alias del mantenimiento heredado `/vector-memory/index-debate`. Conserva `debateId` requerido, `limit` opcional (máximo 50) y el resultado `{ debateId, scanned, indexed, unchanged, empty, cappedAt }`. `indexed` cuenta materialización textual completada; `unchanged` cuenta fuentes cuya revisión permanece intacta. No indica embeddings creados ni trabajo meramente encolado.
 
+### Memoria completa, exportación y borrado
+
+Estas herramientas reutilizan la misma identidad autenticada y permisos de Context Service. `scope: { type: "user" }` selecciona memoria privada propia; `scope: { type: "workspace" }` selecciona fuentes compartidas, sin incluir memoria privada de otros usuarios. Los IDs de memoria/fuente son texto opaco: usa los devueltos por búsqueda o listado, sin convertirlos a UUID.
+
+| Herramienta | Entrada | Resultado y operación |
+|---|---|---|
+| `debatidor_get_context_item` | `itemId` | `GET /context/items/:id`: contenido completo, procedencia y `canDelete` actual |
+| `debatidor_list_context_sources` | `scope?: "user"\|"workspace"`, `cursor?`, `limit?` | `GET /context/sources`: `sources` y `nextCursor`; scope por defecto `user`, 50 fuentes por defecto, máximo 100 |
+| `debatidor_export_context` | `scope`, `format: "json"\|"markdown"`, `sourceIds?`, `kinds?` | `POST /context/exports`: crea un snapshot privado y devuelve solo metadatos |
+| `debatidor_read_context_export` | `exportId`, `cursor?` | `GET /context/exports/:id`: una página completa del snapshot |
+| `debatidor_delete_context_export` | `exportId` | `DELETE /context/exports/:id`: elimina los bytes del snapshot propio, sin borrar memoria canónica |
+| `debatidor_delete_context_item` | `itemId` | `DELETE /context/items/:id`: borra memoria derivada autorizada; devuelve finalización o una operación pendiente |
+| `debatidor_get_context_deletion` | `operationId` | `GET /context/deletions/:id`: consulta el estado de limpieza sin repetir el borrado |
+| `debatidor_get_context_governance` | `{}` | `GET /context/governance`: retención, límites de exports, cuotas operativas y alcance del borrado |
+| `debatidor_delete_context_sources` | `mode: "derived"`, `scope`, `sourceIds` | `POST /context/deletions`: borra memoria derivada existente de una selección explícita de 1–100 fuentes |
+
+La lectura completa y las exportaciones conservan `id`, `sourceId`, `debateId`, `kind`, `content`, `createdAt` y `provenance: { messageId, sourceRevision, originType, originId }`. No aplican los límites de snippets de búsqueda, ni incluyen embeddings, razonamiento, credenciales, jobs internos o `provenance.chunk`. La lectura individual añade `canDelete`; el snapshot lo omite porque los permisos pueden cambiar. El contenido seleccionado puede contener datos personales escritos por el usuario: no se redacta automáticamente.
+
+Crear un export requiere un scope y formato explícitos. `sourceIds` opcional selecciona 1–100 fuentes; al omitirlo, se incluyen las fuentes autorizadas del scope. `kinds` omitido incluye los cinco tipos, a diferencia del default compatible de `search_context`. La respuesta es `{ id, schemaVersion: 1, scope, format, itemCount, pageCount, expiresAt }`, sin host de descarga. Cada llamada crea un snapshot nuevo: no es idempotente.
+
+El snapshot admite hasta 10.000 entradas o 32 MiB de payload, caduca en una hora y se limita a tres exports activos por principal. Un exceso devuelve error, nunca un export truncado. Para leerlo, omite `cursor` en la primera llamada y pasa el `nextCursor` recibido a la siguiente hasta obtener `null`. Cada página contiene hasta 100 entradas completas, los metadatos anteriores, `entries`, `nextCursor` y `markdown`. Un snapshot vacío tiene `itemCount: 0`, `pageCount: 1`, `entries: []` y `nextCursor: null`.
+
+En formato `json`, `markdown` es `null`. En formato `markdown`, concatena literalmente los strings de cada página en orden: solo la primera incluye la cabecera. Las páginas representan el mismo contenido congelado; las ediciones ordinarias posteriores no lo actualizan. Cada lectura revalida todas las referencias del snapshot. Un borrado, pérdida de acceso o caducidad lo invalida con HTTP 410; no presentes páginas obtenidas antes como una exportación completa si falta el resto.
+
+`delete_context_item` distingue HTTP 200 `{ deleted: true }` de HTTP 202 `{ deleted: false, operationId, status: "PENDING" }`. Pendiente significa que el item ya está oculto para búsqueda, pero la limpieza física aún no terminó. Consulta `get_context_deletion` con ese `operationId`; no repitas el DELETE para consultar estado. La operación devuelve `{ id, status, mode: "derived", scope, sourceIds, requestedAt, completedAt, itemCount }`: solo `COMPLETED` lleva fecha de finalización. Una operación creada desde otra superficie puede enumerar más de 100 fuentes; el límite 100 corresponde a la selección explícita de entrada.
+
+El borrado derivado conserva mensajes y turnos originales. La finalización purga contenido derivado, vectores, copias legacy verificadas, trabajos de materialización y snapshots privados afectados; mantiene tombstones sin contenido para impedir resurrección. Las fuentes siguen admitiendo notas/turnos nuevos. Borrar fuentes compartidas exige OWNER; la tool exige `sourceIds` y nunca selecciona todo el workspace de manera implícita. Repetir ese POST genera otra operación y puede abarcar contenido posterior, por lo que no es idempotente. Las copias ya descargadas quedan fuera del control del servicio.
+
+Las lecturas se marcan `readOnlyHint: true`. Crear snapshot se marca escritura no destructiva y no idempotente; borrar un item o export se marca destructivo e idempotente; borrar memoria de fuentes seleccionadas se marca destructivo y no idempotente. **Ninguna mutación se reintenta automáticamente.** Un error de transporte o respuesta inválida no permite inferir finalización.
+
+El MCP valida IDs, formatos, contadores, paginación y estado de borrado; admite campos extra del backend para compatibilidad, pero devuelve solo el contrato declarado. HTTP 401 indica que debe renovarse la vinculación; un 403 de OWNER no implica que la sesión haya caducado. HTTP 404 mantiene indistinguibles recursos inexistentes y ajenos; 410 informa de snapshot inválido; 413 exige reducir explícitamente la selección; 429 indica límite de exports activos. Los cuerpos internos de errores no se exponen.
+
 ### `debatidor_quick_debate`
 
 Inyecta una intervención en una Arena **ya existente** y reutiliza el runtime real de Arena. No crea un segundo orquestador dentro del MCP.
@@ -186,7 +219,7 @@ quickDebate
   -> persistCompletedTurn
 ```
 
-La aceptación final de P7 todavía exige un `quick_debate` desde un cliente MCP real y confirmar el turno persistido.
+Para comprobar el recorrido completo, ejecuta un `quick_debate` desde tu cliente MCP y confirma la respuesta persistida al recargar la Arena.
 
 ## Proyecto conectado por `debatidor-agent`
 

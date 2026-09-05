@@ -5,6 +5,14 @@ import {
   type ContextSearchResult,
   type IndexDebateContextResult,
 } from './context-contracts.js';
+import type * as z from 'zod/v4';
+import {
+  contextIdSchema, contextItemSchema, contextSourcesSchema,
+  contextExportSchema, contextExportPageSchema, contextExportDeletedSchema,
+  contextItemDeletedSchema, contextDeletionSchema, contextGovernanceSchema,
+  type ContextSourcesInput, type CreateContextExportInput,
+  type ReadContextExportInput, type DeleteContextSourcesInput,
+} from './context-governance-contracts.js';
 export type { ContextKind, ContextHit, ContextSearchResult, IndexDebateContextResult } from './context-contracts.js';
 
 export type DebateSummary = {
@@ -201,6 +209,75 @@ export class DebatidorApiClient {
     );
   }
 
+  async getContextItem(itemId: string) {
+    const id = contextIdSchema.parse(itemId);
+    const result = parseContext(contextItemSchema, await this.request(`/context/items/${encodeURIComponent(id)}`, { expectedStatus: 200 }));
+    if (result.id !== id) throw invalidContextResponse();
+    return result;
+  }
+
+  async listContextSources(input: ContextSourcesInput = {}) {
+    const query = new URLSearchParams({ scope: input.scope ?? 'user' });
+    if (input.cursor !== undefined) query.set('cursor', input.cursor);
+    if (input.limit !== undefined) query.set('limit', String(input.limit));
+    const result = parseContext(contextSourcesSchema, await this.request(`/context/sources?${query}`, { expectedStatus: 200 }));
+    const visibility = (input.scope ?? 'user') === 'user' ? 'PRIVATE' : 'WORKSPACE';
+    if (result.sources.length > (input.limit ?? 50) || result.sources.some(source => source.visibility !== visibility) ||
+        (result.nextCursor !== null && result.nextCursor === input.cursor)) throw invalidContextResponse();
+    return result;
+  }
+
+  async createContextExport(input: CreateContextExportInput) {
+    const result = parseContext(contextExportSchema, await this.request('/context/exports', { method: 'POST', body: input, expectedStatus: 201 }));
+    if (result.scope.type !== input.scope.type || result.format !== input.format) throw invalidContextResponse();
+    return result;
+  }
+
+  async readContextExport(input: ReadContextExportInput) {
+    const id = contextIdSchema.parse(input.exportId);
+    const query = input.cursor === undefined ? '' : `?${new URLSearchParams({ cursor: input.cursor })}`;
+    const result = parseContext(contextExportPageSchema, await this.request(`/context/exports/${encodeURIComponent(id)}${query}`, { expectedStatus: 200 }));
+    const offset = input.cursor === undefined ? 0 : Number(input.cursor);
+    const expectedLength = Math.min(100, result.itemCount - offset);
+    const expectedNext = offset + result.entries.length < result.itemCount ? String(offset + result.entries.length) : null;
+    if (result.id !== id || !Number.isSafeInteger(offset) || offset < 0 || offset % 100 !== 0 ||
+        offset >= Math.max(1, result.itemCount) || result.entries.length !== expectedLength || result.nextCursor !== expectedNext) {
+      throw invalidContextResponse();
+    }
+    return result;
+  }
+
+  async deleteContextExport(exportId: string) {
+    const id = contextIdSchema.parse(exportId);
+    return parseContext(contextExportDeletedSchema, await this.request(`/context/exports/${encodeURIComponent(id)}`, { method: 'DELETE', expectedStatus: 200 }));
+  }
+
+  async deleteContextItem(itemId: string) {
+    const id = contextIdSchema.parse(itemId);
+    const response = await this.requestWithStatus(`/context/items/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    const result = parseContext(contextItemDeletedSchema, response.data);
+    if ((result.deleted && response.status !== 200) || (!result.deleted && response.status !== 202)) throw invalidContextResponse();
+    return result;
+  }
+
+  async getContextDeletion(operationId: string) {
+    const id = contextIdSchema.parse(operationId);
+    const result = parseContext(contextDeletionSchema, await this.request(`/context/deletions/${encodeURIComponent(id)}`, { expectedStatus: 200 }));
+    if (result.id !== id) throw invalidContextResponse();
+    return result;
+  }
+
+  async deleteContextSources(input: DeleteContextSourcesInput) {
+    const result = parseContext(contextDeletionSchema, await this.request('/context/deletions', { method: 'POST', body: input, expectedStatus: 201 }));
+    if (result.scope.type !== input.scope.type || result.sourceIds.length !== new Set(input.sourceIds).size ||
+        result.sourceIds.some(id => !input.sourceIds.includes(id))) throw invalidContextResponse();
+    return result;
+  }
+
+  async getContextGovernance() {
+    return parseContext(contextGovernanceSchema, await this.request('/context/governance', { expectedStatus: 200 }));
+  }
+
   async executeAgent(input: AgentExecutionInput): Promise<AgentExecutionResult> {
     return this.request<AgentExecutionResult>('/agent-execution/execute', {
       method: 'POST',
@@ -215,8 +292,15 @@ export class DebatidorApiClient {
 
   private async request<T = unknown>(
     path: string,
-    options: { method?: 'GET' | 'POST'; body?: unknown } = {},
+    options: { method?: 'GET' | 'POST' | 'DELETE'; body?: unknown; expectedStatus?: number } = {},
   ): Promise<T> {
+    return (await this.requestWithStatus<T>(path, options)).data;
+  }
+
+  private async requestWithStatus<T = unknown>(
+    path: string,
+    options: { method?: 'GET' | 'POST' | 'DELETE'; body?: unknown; expectedStatus?: number } = {},
+  ): Promise<{ data: T; status: number }> {
     const headers: Record<string, string> = { accept: 'application/json' };
     if (this.auth.type === 'api-key') headers['x-api-key'] = this.auth.token;
     else headers.authorization = `Bearer ${this.auth.token}`;
@@ -257,12 +341,24 @@ export class DebatidorApiClient {
       );
     }
 
+    if (options.expectedStatus !== undefined && response.status !== options.expectedStatus) throw invalidContextResponse();
+
     try {
-      return (await response.json()) as T;
+      return { data: (await response.json()) as T, status: response.status };
     } catch {
       throw new DebatidorApiError('debatidor_upstream_response_invalid', 502, 'upstream_response_invalid');
     }
   }
+}
+
+function invalidContextResponse() {
+  return new DebatidorApiError('debatidor_context_response_invalid', 502, 'context_response_invalid');
+}
+
+function parseContext<S extends z.ZodType>(schema: S, value: unknown): z.infer<S> {
+  const result = schema.safeParse(value);
+  if (!result.success) throw invalidContextResponse();
+  return result.data;
 }
 
 function compactDebate(debate: DebateSummary): DebateSummary {
