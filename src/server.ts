@@ -10,7 +10,7 @@ import {
   type QuickDebateResult,
 } from './debatidor-api.js';
 
-export const SERVER_VERSION = '0.7.1';
+export const SERVER_VERSION = '0.7.2';
 export const PROTOCOL_VERSION = '2026-07-28';
 
 export type DebatidorServerOptions = {
@@ -293,7 +293,7 @@ function registerQuickDebateTool(server: McpServer, api: DebatidorApiClient) {
     {
       title: 'Run a quick Debatidor turn',
       description:
-        'Inject one explicit intervention into an existing Debatidor arena and delegate execution to the existing Arena runtime. The arena and participants must already exist. Depending on mode this can invoke provider APIs and/or connected browser participants, so it may incur provider usage and is not idempotent.',
+        'Send one explicit intervention to an existing Debatidor arena. Browser replies are saved in its transcript; this tool does not enable filesystem or shell tools in browser chats. The arena and participants must already exist. Set connectionId to target one web participant; otherwise every configured web participant must be ready. Depending on mode this can invoke provider APIs and/or connected browser participants, so it may incur provider usage and is not idempotent.',
       inputSchema: z.object({
         debateId: z
           .string()
