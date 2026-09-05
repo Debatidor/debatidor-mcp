@@ -33,14 +33,18 @@ test('memory tools retain the previous required contract over real HTTP MCP tran
       assert.equal(new Headers(init?.headers).get('x-api-key'), null);
       const requestBody = JSON.parse(String(init?.body)) as { query?: string; kinds?: string[] };
       if (new URL(String(input)).pathname === '/context/search') searchBodies.push(requestBody);
+      const hybrid = requestBody.query === 'idea nueva';
+      const content = 'El despliegue conserva el historial del workspace.';
       const body = new URL(String(input)).pathname === '/context/search'
         ? {
           hits: [{ id: 'memory-1', sourceId: 'source-1', debateId: 'deb-1',
             kind: requestBody.kinds?.includes('FACT') ? 'FACT' : 'MESSAGE',
-            content: 'El despliegue conserva el historial del workspace.', score: 1.25,
-            semanticSimilarity: null, createdAt: '2026-09-05T12:00:00.000Z',
-            provenance: { messageId: 'message-1', sourceRevision: 1, originType: 'message', originId: 'message-1' } }],
-          retrieval: { method: 'text', semanticStatus: 'unavailable' }, partial: false,
+            content, score: hybrid ? 0.03 : 1.25,
+            semanticSimilarity: hybrid ? 0.76 : null, createdAt: '2026-09-05T12:00:00.000Z',
+            provenance: { messageId: 'message-1', sourceRevision: 1, originType: 'message', originId: 'message-1',
+              ...(hybrid ? { chunk: { id: 'chunk-1', chunkerVersion: 'utf16-v1', startUtf16: 5, endUtf16: 5 + content.length } } : {}),
+            } }],
+          retrieval: { method: hybrid ? 'hybrid' : 'text', semanticStatus: hybrid ? 'ready' : 'unavailable' }, partial: false,
         }
         : { debateId: 'deb-1', scanned: 1, indexed: 0, unchanged: 1, empty: 0, cappedAt: 50 };
       return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
@@ -75,10 +79,16 @@ test('memory tools retain the previous required contract over real HTTP MCP tran
     assert.equal(factHits[0].kind, 'FACT');
     assert.equal(factHits[0].similarity, 0);
     assert.deepEqual(searchBodies[1], { query: 'historial', debateId: 'deb-1', kinds: ['FACT'] });
+    const hybrid = await client.callTool({ name: 'debatidor_search_context', arguments: { query: 'idea nueva', debateId: 'deb-1' } });
+    assert.equal(hybrid.isError, undefined);
+    const hybridPrevious = previousSearchContract.parse(hybrid.structuredContent);
+    assert.equal(hybridPrevious.hits[0].similarity, 0.76);
+    assert.equal(hybridPrevious.hits[0].kind, 'MESSAGE');
+    assert.deepEqual(searchBodies[2], { query: 'idea nueva', debateId: 'deb-1', kinds: ['MESSAGE', 'CONCLUSION'] });
     const index = await client.callTool({ name: 'debatidor_index_context', arguments: { debateId: 'deb-1' } });
     assert.equal(index.isError, undefined);
     assert.deepEqual(index.structuredContent, { debateId: 'deb-1', scanned: 1, indexed: 0, unchanged: 1, empty: 0, cappedAt: 50 });
-    assert.deepEqual(upstreamPaths, ['/context/search', '/context/search', '/context/index-debate']);
+    assert.deepEqual(upstreamPaths, ['/context/search', '/context/search', '/context/search', '/context/index-debate']);
   } finally {
     await client.close().catch(() => undefined);
     await handler.close();
