@@ -10,8 +10,9 @@ import {
   type QuickDebateResult,
 } from './debatidor-api.js';
 import { contextSearchSchema, contextIndexSchema, contextKindSchema } from './context-contracts.js';
+import { registerContextGovernanceTools } from './context-governance-tools.js';
 
-export const SERVER_VERSION = '0.7.4';
+export const SERVER_VERSION = '0.7.5';
 export const PROTOCOL_VERSION = '2026-07-28';
 
 export type DebatidorServerOptions = {
@@ -123,6 +124,7 @@ export function createDebatidorServer(options: DebatidorServerOptions): McpServe
     registerLeadStatusTool(server, options.api);
     registerSearchContextTool(server, options.api);
     registerIndexContextTool(server, options.api);
+    registerContextGovernanceTools(server, options.api, safeContextError);
     registerQuickDebateTool(server, options.api);
     registerAgentTools(server, options.api);
   }
@@ -571,6 +573,26 @@ function safeToolError(error: unknown) {
 }
 
 function safeContextError(error: unknown) {
+  if (error instanceof DebatidorApiError) {
+    const messages: Record<string, string> = {
+      context_item_not_found: 'That memory item is unavailable in your authorized scope (missing, deleted, expired or inaccessible).',
+      context_source_not_found: 'That memory source is unavailable in your authorized scope.',
+      context_export_not_found: 'That export is unavailable to the authenticated account.',
+      context_deletion_not_found: 'That deletion operation is unavailable to the authenticated account.',
+      context_export_unavailable: 'The export is no longer available because it expired or its source access/content was removed. Do not combine earlier pages into a purported complete export.',
+      context_export_quota: 'The active export snapshot limit was reached. Delete an existing export or wait for expiry before explicitly creating another.',
+      context_export_too_large: 'The selected export exceeds the item or byte limit. Explicitly select fewer sources or kinds; no truncated export was returned.',
+      context_workspace_owner_required: 'Only the current workspace owner can delete shared derived memory. Your account link may still be valid.',
+      context_scope_invalid: 'Select an explicit user or workspace scope.',
+      context_cursor_invalid: 'Use the nextCursor returned by the same source listing or export.',
+      context_sources_invalid: 'Select between 1 and 100 valid memory source ids.',
+      context_kind_invalid: 'Select valid memory kinds: MESSAGE, CONCLUSION, FACT, DECISION or SUMMARY.',
+      context_export_format_invalid: 'Select json or markdown export format.',
+      context_deletion_mode_invalid: 'Only explicit derived memory deletion is supported; original history is preserved.',
+    };
+    const text = error.code ? messages[error.code] : undefined;
+    if (text) return { content: [{ type: 'text' as const, text }], isError: true };
+  }
   if (error instanceof DebatidorApiError &&
       (error.code === 'provider_key_not_configured' || error.code === 'embeddings_key_required')) {
     return {
