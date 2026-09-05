@@ -1,3 +1,12 @@
+import {
+  canonicalContextSearchSchema,
+  contextIndexSchema,
+  type ContextKind,
+  type ContextSearchResult,
+  type IndexDebateContextResult,
+} from './context-contracts.js';
+export type { ContextKind, ContextHit, ContextSearchResult, IndexDebateContextResult } from './context-contracts.js';
+
 export type DebateSummary = {
   id: string;
   title: string;
@@ -24,17 +33,6 @@ export type LeadStatus = {
   participants?: ParticipantSummary[];
 };
 
-export type ContextKind = 'MESSAGE' | 'CONCLUSION';
-
-export type ContextHit = {
-  id: string;
-  debateId: string | null;
-  kind: ContextKind;
-  content: string;
-  similarity: number;
-  createdAt?: string;
-};
-
 export type SearchContextInput = {
   query: string;
   debateId?: string;
@@ -45,15 +43,6 @@ export type SearchContextInput = {
 export type IndexDebateContextInput = {
   debateId: string;
   limit?: number;
-};
-
-export type IndexDebateContextResult = {
-  debateId: string;
-  scanned: number;
-  indexed: number;
-  unchanged: number;
-  empty: number;
-  cappedAt: number;
 };
 
 export type QuickDebateInput = {
@@ -158,30 +147,44 @@ export class DebatidorApiClient {
     };
   }
 
-  async searchContext(input: SearchContextInput): Promise<ContextHit[]> {
-    const result = await this.request<unknown>('/vector-memory/search', {
+  async searchContext(input: SearchContextInput): Promise<ContextSearchResult> {
+    const result = await this.request<unknown>('/context/search', {
       method: 'POST',
       body: {
         query: input.query,
         debateId: input.debateId,
-        kinds: input.kinds,
+        // Preserve the original MCP scope even though Context Service supports
+        // more kinds by default. New kinds must be requested explicitly.
+        kinds: input.kinds?.length ? input.kinds : ['MESSAGE', 'CONCLUSION'],
         limit: input.limit,
       },
     });
-    if (!Array.isArray(result)) return [];
-    return result.map(compactContextHit);
+    const parsed = canonicalContextSearchSchema.safeParse(result);
+    if (!parsed.success || (input.debateId && parsed.data.hits.some((hit) => hit.debateId !== input.debateId))) {
+      throw new DebatidorApiError('debatidor_context_response_invalid', 502, 'context_response_invalid');
+    }
+    return {
+      hits: parsed.data.hits.map((hit) => ({ ...hit, similarity: 0 as const, retrievalMethod: 'text' as const })),
+      retrieval: parsed.data.retrieval,
+      partial: parsed.data.partial,
+    };
   }
 
   async indexDebateContext(
     input: IndexDebateContextInput,
   ): Promise<IndexDebateContextResult> {
-    return this.request<IndexDebateContextResult>('/vector-memory/index-debate', {
+    const result = await this.request<unknown>('/context/index-debate', {
       method: 'POST',
       body: {
         debateId: input.debateId,
         limit: input.limit,
       },
     });
+    const parsed = contextIndexSchema.safeParse(result);
+    if (!parsed.success || parsed.data.debateId !== input.debateId) {
+      throw new DebatidorApiError('debatidor_context_response_invalid', 502, 'context_response_invalid');
+    }
+    return parsed.data;
   }
 
   async quickDebate(input: QuickDebateInput): Promise<QuickDebateResult> {
@@ -254,7 +257,11 @@ export class DebatidorApiClient {
       );
     }
 
-    return (await response.json()) as T;
+    try {
+      return (await response.json()) as T;
+    } catch {
+      throw new DebatidorApiError('debatidor_upstream_response_invalid', 502, 'upstream_response_invalid');
+    }
   }
 }
 
@@ -278,18 +285,6 @@ function compactParticipant(participant: ParticipantSummary): ParticipantSummary
     status: participant.status ? String(participant.status) : undefined,
     providerId: participant.providerId ? String(participant.providerId) : undefined,
     modelId: participant.modelId ? String(participant.modelId) : undefined,
-  };
-}
-
-function compactContextHit(hit: unknown): ContextHit {
-  const row = (hit && typeof hit === 'object' ? hit : {}) as Record<string, unknown>;
-  return {
-    id: String(row.id ?? ''),
-    debateId: row.debateId == null ? null : String(row.debateId),
-    kind: row.kind === 'CONCLUSION' ? 'CONCLUSION' : 'MESSAGE',
-    content: String(row.content ?? ''),
-    similarity: Number.isFinite(Number(row.similarity)) ? Number(row.similarity) : 0,
-    createdAt: row.createdAt ? String(row.createdAt) : undefined,
   };
 }
 
