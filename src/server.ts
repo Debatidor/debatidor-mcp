@@ -10,7 +10,7 @@ import {
   type QuickDebateResult,
 } from './debatidor-api.js';
 
-export const SERVER_VERSION = '0.7.0';
+export const SERVER_VERSION = '0.7.1';
 export const PROTOCOL_VERSION = '2026-07-28';
 
 export type DebatidorServerOptions = {
@@ -601,6 +601,15 @@ function formatSafeError(error: unknown): string {
     }
     if (error.code === 'quick_debate_prompt_required') {
       return 'A non-empty prompt is required to run a quick debate.';
+    }
+    if (error.code === 'quick_debate_browser_not_configured') {
+      return 'Add the selected web participant to this Arena before running a web turn.';
+    }
+    if (error.code === 'quick_debate_browser_not_ready') {
+      return 'The web participant is not ready. Set this Arena id in the Debatidor extension, enable injection for its tab, and wait until the participant is available.';
+    }
+    if (error.code === 'quick_debate_dispatch_failed') {
+      return 'The turn could not be dispatched. Inspect the Arena and extension before trying again; do not automatically repeat the request.';
     }
     if (error.code === 'vector_memory_debate_not_found') {
       return 'That debate is not available in the authenticated Debatidor workspace.';

@@ -30,7 +30,7 @@ El endpoint remoto es el camino de producto. `stdio` se conserva para clientes l
 
 ## Estado actual
 
-Versión `0.7.0`:
+Versión `0.7.1`:
 
 - MCP TypeScript SDK v2, revisión objetivo `2026-07-28`;
 - Streamable HTTP stateless en `/mcp`;
@@ -43,6 +43,8 @@ Versión `0.7.0`:
 - `debatidor_quick_debate` para inyectar una intervención en una Arena existente;
 - `debatidor_agent_list/read/write/shell` para operar un proyecto conectado por `debatidor-agent` sin DOM;
 - bridge API-key legacy solo para dogfooding local/privado.
+
+Para `quick_debate` en modo web, usar la extensión 0.4.6 o posterior, vincular la sala y habilitar la pestaña del proveedor. La herramienta informa si el navegador no está configurado, no está listo o no pudo recibir el turno. `accepted: true` confirma el despacho; comprobar la respuesta del participante en la Arena y recargarla para verificar su persistencia. No reintentar automáticamente después de un fallo de despacho.
 
 La implementación actual de vector-memory todavía usa OpenAI BYOK para embeddings. **Eso es deuda transitoria, no el contrato futuro del producto.** ADR-0011/P11 fijan que historial/contexto/memoria serán first-party Debatidor y no dependerán de créditos externos del usuario. P7 únicamente transporta las tools.
 
@@ -136,13 +138,13 @@ Lee Arenas `LEAD` visibles en el workspace del principal OAuth. Con `debateId`, 
 
 Búsqueda read-only sobre la memoria del workspace. El contrato MCP no conoce ni debe conocer el proveedor de embeddings.
 
-**Estado transitorio 0.7.0:** el backend actual todavía genera embeddings con OpenAI BYOK. P11 reemplazará ese acoplamiento por memoria/retrieval first-party administrado por Debatidor.
+**Estado transitorio 0.7.x:** el backend actual todavía genera embeddings con OpenAI BYOK. P11 reemplazará ese acoplamiento por memoria/retrieval first-party administrado por Debatidor.
 
 ### `debatidor_index_context`
 
 Reindexa/materializa mensajes persistidos de una Arena. Es una write no destructiva e idempotente por fuente.
 
-**Estado transitorio 0.7.0:** el backend actual todavía usa OpenAI BYOK para los embeddings. En P11 esta tool queda como mantenimiento/backfill; el flujo normal de memoria será automático y first-party.
+**Estado transitorio 0.7.x:** el backend actual todavía usa OpenAI BYOK para los embeddings. En P11 esta tool queda como mantenimiento/backfill; el flujo normal de memoria será automático y first-party.
 
 ### `debatidor_quick_debate`
 
