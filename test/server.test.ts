@@ -30,6 +30,20 @@ function contextResponse() {
   };
 }
 
+function hybridResponse() {
+  const content = 'Una cita exacta 🧠 de la fuente.';
+  const original = contextResponse();
+  return {
+    ...original,
+    hits: [{ ...original.hits[0], content, score: 0.029, semanticSimilarity: 0.81,
+      provenance: { ...original.hits[0].provenance,
+        chunk: { id: 'chunk_1', chunkerVersion: 'utf16-v1', startUtf16: 12, endUtf16: 12 + content.length },
+      },
+    }, { ...original.hits[0], id: 'text_only', score: 0.01 }],
+    retrieval: { method: 'hybrid', semanticStatus: 'ready', modelKey: 'minilm-v1' },
+  };
+}
+
 async function withClient(
   api: DebatidorApiClient | undefined,
   run: (client: Client) => Promise<void>,
@@ -212,6 +226,80 @@ test('omitted and empty memory kinds send the compatible default filter explicit
     { query: 'context', kinds: ['MESSAGE', 'CONCLUSION'] },
     { query: 'context', kinds: ['MESSAGE', 'CONCLUSION'] },
   ]);
+});
+
+test('hybrid MCP results retain exact chunk provenance and distinguish relevance from cosine', async () => {
+  const api = new DebatidorApiClient('https://api.test', { type: 'bearer', token: 'hybrid_test' },
+    async () => jsonResponse(hybridResponse()));
+  await withClient(api, async (client) => {
+    const response = await client.callTool({ name: 'debatidor_search_context', arguments: { query: 'idea' } });
+    assert.equal(response.isError, undefined);
+    const structured = response.structuredContent as { hits: Array<Record<string, unknown>>; retrieval: unknown };
+    assert.deepEqual(structured.retrieval, hybridResponse().retrieval);
+    assert.deepEqual(structured.hits, hybridResponse().hits.map(hit => ({
+      ...hit, similarity: hit.semanticSimilarity ?? 0, retrievalMethod: 'hybrid',
+    })));
+    const text = (response.content as Array<{ text?: string }>)[0]?.text ?? '';
+    assert.match(text, /hybrid relevance score 0\.029 · cosine similarity 0\.810/);
+    assert.match(text, /Chunk: chunk_1 · utf16-v1 · UTF-16 \[12, /);
+    assert.doesNotMatch(text, /text relevance score|cosine similarity 0\.029|81%/);
+  });
+});
+
+test('all hybrid availability states and reasons allow textual fallback through MCP without an error', async () => {
+  let state = { semanticStatus: 'warming', reason: 'index_pending' };
+  const api = new DebatidorApiClient('https://api.test', { type: 'bearer', token: 'fallback_test' },
+    async () => jsonResponse({ ...contextResponse(), retrieval: { method: 'text', ...state }, partial: state.semanticStatus === 'partial' }));
+  await withClient(api, async (client) => {
+    for (const [semanticStatus, reason] of [
+      ['warming', 'index_pending'], ['busy', 'quota'], ['busy', 'timeout'],
+      ['unavailable', 'disabled'], ['unavailable', 'model_unavailable'], ['unavailable', 'inference_failed'],
+      ['partial', 'query_over_budget'],
+    ]) {
+      state = { semanticStatus, reason };
+      const response = await client.callTool({ name: 'debatidor_search_context', arguments: { query: 'idea' } });
+      assert.equal(response.isError, undefined);
+      const data = response.structuredContent as { retrieval: unknown; hits: Array<{ similarity: number }> };
+      assert.deepEqual(data.retrieval, { method: 'text', ...state });
+      assert.equal(data.hits[0].similarity, 0);
+    }
+  });
+});
+
+test('malformed hybrid scores, availability and source spans are visible MCP errors', async () => {
+  const payload = hybridResponse();
+  const hit = payload.hits[0];
+  assert.ok('chunk' in hit.provenance);
+  const chunk = hit.provenance.chunk;
+  const invalid = [
+    ...[1.1, -1.1, '0.8'].map(value => ({ ...payload, hits: [{ ...hit, semanticSimilarity: value }] })),
+    { ...payload, hits: [{ ...hit, score: -0.1 }] },
+    { ...payload, hits: [{ ...hit, provenance: contextResponse().hits[0].provenance }] },
+    { ...payload, hits: [{ ...hit, semanticSimilarity: null }] },
+    ...[
+      { ...chunk, startUtf16: -1 }, { ...chunk, endUtf16: chunk.startUtf16 },
+      { ...chunk, endUtf16: chunk.endUtf16 + 1 }, { ...chunk, startUtf16: 1.5 },
+      { ...chunk, id: '' }, { ...chunk, chunkerVersion: '' },
+    ].map(value => ({ ...payload, hits: [{ ...hit, provenance: { ...hit.provenance, chunk: value } }] })),
+    { ...payload, retrieval: { ...payload.retrieval, method: 'text' } },
+    { ...payload, retrieval: { ...payload.retrieval, semanticStatus: 'invented' } },
+    { ...payload, retrieval: { ...payload.retrieval, reason: 'invented' } },
+    { ...payload, retrieval: { ...payload.retrieval, modelKey: 7 } },
+  ];
+  let current: unknown;
+  const api = new DebatidorApiClient('https://api.test', { type: 'bearer', token: 'private_token' },
+    async () => jsonResponse(current));
+  await withClient(api, async (client) => {
+    for (const value of invalid) {
+      current = value;
+      const response = await client.callTool({ name: 'debatidor_search_context', arguments: { query: 'idea' } });
+      assert.equal(response.isError, true);
+      assert.equal(response.structuredContent, undefined);
+      const text = (response.content as Array<{ text?: string }>)[0]?.text ?? '';
+      assert.match(text, /invalid response/i);
+      assert.doesNotMatch(text, /private_token|Una cita exacta/);
+    }
+  });
 });
 
 test('explicit memory filters and outputs support all five context kinds through the MCP runtime', async () => {

@@ -11,7 +11,7 @@ import {
 } from './debatidor-api.js';
 import { contextSearchSchema, contextIndexSchema, contextKindSchema } from './context-contracts.js';
 
-export const SERVER_VERSION = '0.7.3';
+export const SERVER_VERSION = '0.7.4';
 export const PROTOCOL_VERSION = '2026-07-28';
 
 export type DebatidorServerOptions = {
@@ -172,7 +172,7 @@ function registerSearchContextTool(server: McpServer, api: DebatidorApiClient) {
     {
       title: 'Search Debatidor context',
       description:
-        'Search context stored by Debatidor in the authenticated workspace. Defaults to MESSAGE and CONCLUSION for compatibility; explicitly request FACT, DECISION or SUMMARY to include those kinds. Optionally scope results to one debate. Results identify their retrieval method, score and source provenance. Text search remains available when semantic retrieval is unavailable. This is read-only; indexing is not a prerequisite.',
+        'Search context stored by Debatidor in the authenticated workspace. Defaults to MESSAGE and CONCLUSION for compatibility; explicitly request FACT, DECISION or SUMMARY to include those kinds. Optionally scope results to one debate. Results identify text or hybrid retrieval, relevance score, semantic availability and source provenance. Semantic matches include an exact source excerpt with UTF-16 chunk positions. Text search remains available when semantic retrieval is warming, busy or unavailable. This is read-only; indexing is not a prerequisite.',
       inputSchema: z.object({
         query: z
           .string()
@@ -517,7 +517,10 @@ function formatContextSearch(query: string, result: ContextSearchResult): string
 
   const lines = result.hits.map((hit) => {
     const debate = hit.debateId ? ` · debate ${hit.debateId}` : '';
-    return `- [${hit.kind}] text relevance score ${hit.score.toFixed(3)}${debate}\n  Source: ${hit.sourceId} · revision ${hit.provenance.sourceRevision}\n  ${hit.content}`;
+    const chunk = hit.provenance.chunk;
+    const citation = chunk ? `\n  Chunk: ${chunk.id} · ${chunk.chunkerVersion} · UTF-16 [${chunk.startUtf16}, ${chunk.endUtf16})` : '';
+    const cosine = hit.semanticSimilarity !== null ? ` · cosine similarity ${hit.semanticSimilarity.toFixed(3)}` : '';
+    return `- [${hit.kind}] ${result.retrieval.method} relevance score ${hit.score.toFixed(3)}${cosine}${debate}\n  Source: ${hit.sourceId} · revision ${hit.provenance.sourceRevision}${citation}\n  ${hit.content}`;
   });
   return [status, partial, `Context matches: ${result.hits.length}`, ...lines].filter(Boolean).join('\n');
 }

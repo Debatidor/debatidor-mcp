@@ -144,12 +144,16 @@ Búsqueda read-only del contexto del workspace autenticado, opcionalmente limita
 
 El MCP consume `POST /context/search`, el mismo Context Service del Hub. Conserva `query`, `hitCount`, `hits` y los campos previos de cada hit. Añade:
 
-- `score`: relevancia textual, sin prometer una escala de similitud;
-- `retrievalMethod: "text"` y `semanticSimilarity: null`;
+- `score`: relevancia textual o híbrida, sin prometer una escala de similitud;
+- `retrievalMethod: "text" | "hybrid"` y `semanticSimilarity: number | null`;
 - `sourceId` y `provenance`: `messageId` (nullable), `sourceRevision` (entero), `originType` y `originId`;
-- `retrieval: { method: "text", semanticStatus: "unavailable" }` y `partial` a nivel de respuesta.
+- `retrieval` (método y disponibilidad semántica) y `partial` a nivel de respuesta; el contrato anterior `text` / `unavailable` sigue siendo válido.
 
-El campo requerido heredado `similarity` se mantiene numérico con valor `0` para compatibilidad. Es un marcador de recuperación textual, **no una similitud coseno medida**. El texto de la tool usa `score` y comunica el método, la indisponibilidad semántica y si los resultados son parciales.
+El campo requerido heredado `similarity` se mantiene numérico: toma `semanticSimilarity` cuando existe una coincidencia semántica y `0` cuando es solo textual. Ese cero textual es un marcador de compatibilidad, **no una similitud coseno medida**. El texto de la tool distingue `score` de la similitud coseno y comunica método, disponibilidad semántica y resultados parciales.
+
+El consumidor acepta también el contrato híbrido sin cambiar endpoints ni inputs: `retrieval.method` y `retrievalMethod` pueden ser `text` o `hybrid`; `semanticStatus` acepta `unavailable`, `warming`, `busy`, `ready` o `partial`. `score` es relevancia FTS o fusión RRF, nunca coseno; `semanticSimilarity` es `null` o un coseno entre -1 y 1. El envelope puede incluir `retrieval.modelKey` y `reason` (`disabled`, `model_unavailable`, `query_over_budget`, `index_pending`, `quota`, `timeout`, `inference_failed`).
+
+Cada hit semántico incluye `provenance.chunk: { id, chunkerVersion, startUtf16, endUtf16 }`. Las posiciones son índices UTF-16 sobre el texto original, con fin excluido; `content` es la cita exacta y su longitud coincide con el rango. `hit.id` sigue identificando la entrada original. Los hits puramente textuales conservan `semanticSimilarity: null` y no tienen chunk, incluso dentro de una respuesta híbrida. Los consumidores deben desplegarse antes de activar el contrato híbrido del backend.
 
 Una respuesta malformada del backend devuelve `isError: true`; nunca se transforma en una lista vacía ni provoca una indexación o un fallback automático al backend anterior. Una búsqueda válida sin coincidencias devuelve `hits: []` junto con sus metadatos. El endpoint backend heredado `/vector-memory/search` conserva su array para otros consumidores; este MCP utiliza el envelope canónico de Context Service.
 

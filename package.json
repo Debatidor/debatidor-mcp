@@ -1,6 +1,6 @@
 {
   "name": "@debatidor/mcp",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "Servidor MCP remoto oficial de Debatidor para ChatGPT, Claude, Gemini y otros clientes compatibles.",
   "type": "module",
   "bin": {

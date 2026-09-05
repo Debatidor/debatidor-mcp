@@ -164,7 +164,7 @@ export class DebatidorApiClient {
       throw new DebatidorApiError('debatidor_context_response_invalid', 502, 'context_response_invalid');
     }
     return {
-      hits: parsed.data.hits.map((hit) => ({ ...hit, similarity: 0 as const, retrievalMethod: 'text' as const })),
+      hits: parsed.data.hits.map((hit) => ({ ...hit, similarity: hit.semanticSimilarity ?? 0, retrievalMethod: parsed.data.retrieval.method })),
       retrieval: parsed.data.retrieval,
       partial: parsed.data.partial,
     };
