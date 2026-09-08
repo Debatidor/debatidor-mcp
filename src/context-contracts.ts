@@ -12,11 +12,43 @@ const chunkSchema = z.object({
   endUtf16: z.number().int().positive(),
 }).refine(chunk => chunk.endUtf16 > chunk.startUtf16, 'Chunk end must follow its start.');
 
+export const contextRawTypeSchema = z.enum(['MESSAGE', 'SESSION_EVENT']);
+const originId = z.string().min(1).max(500).refine(id => id === id.trim() && !/[\u0000-\u001f\u007f]/.test(id) &&
+  [...id].every(char => char.length === 2 || char.charCodeAt(0) < 0xd800 || char.charCodeAt(0) > 0xdfff), 'Invalid provenance identifier.');
+export const contextOriginSchema = z.object({
+  rawType: contextRawTypeSchema,
+  rawId: originId,
+  sourceId: originId,
+  revision: z.number().int().positive(),
+  startUtf16: z.number().int().nonnegative(),
+  endUtf16: z.number().int().nonnegative(),
+}).refine(origin => origin.endUtf16 >= origin.startUtf16, 'Origin spans use UTF-16 offsets; an unquoted considered input may have an empty span.');
+export const contextOriginsSchema = z.array(contextOriginSchema).min(1).max(32)
+  .refine(origins => new Set(origins.map(origin => JSON.stringify(origin))).size === origins.length, 'Exact duplicate origins are not allowed; distinct spans of one raw record are allowed.');
+export const contextDerivationSchema = z.object({
+  method: z.enum(['verbatim', 'extractive', 'declared']),
+  pipelineVersion: z.literal(1),
+  coverage: z.record(z.string(), z.union([z.number().describe('Numeric coverage metric.'), z.boolean().describe('Coverage flag.')])).optional(),
+});
+
+export function validContextKnowledge(entry: {
+  kind: ContextKind; sourceId: string;
+  provenance: { origins?: z.infer<typeof contextOriginsSchema> };
+  derivation?: z.infer<typeof contextDerivationSchema>;
+}): boolean {
+  if (entry.provenance.origins?.some(origin => origin.sourceId !== entry.sourceId)) return false;
+  const method = entry.derivation?.method;
+  return method === undefined || (method === 'extractive' && entry.kind === 'SUMMARY') ||
+    (method === 'verbatim' && entry.kind === 'MESSAGE') ||
+    (method === 'declared' && ['FACT', 'DECISION', 'CONCLUSION'].includes(entry.kind));
+}
+
 export const contextProvenanceSchema = z.object({
   messageId: z.string().min(1).nullable(),
   sourceRevision: z.number().int().positive(),
   originType: z.string().min(1),
   originId: z.string().min(1),
+  origins: contextOriginsSchema.optional(),
   chunk: chunkSchema.optional(),
 });
 
@@ -36,6 +68,7 @@ const hitShape = {
   score: z.number().nonnegative(),
   semanticSimilarity: similaritySchema.nullable(),
   createdAt: z.iso.datetime({ offset: true }),
+  derivation: contextDerivationSchema.optional(),
   provenance: contextProvenanceSchema,
 };
 type CanonicalHit = z.infer<z.ZodObject<typeof hitShape>>;
@@ -44,7 +77,8 @@ function validChunkQuote(hit: CanonicalHit): boolean {
   return (hit.semanticSimilarity !== null) === Boolean(chunk) &&
     (!chunk || chunk.endUtf16 - chunk.startUtf16 === hit.content.length);
 }
-const canonicalContextHitSchema = z.object(hitShape).refine(validChunkQuote, 'Semantic hits require an exact UTF-16 chunk quote.');
+const canonicalContextHitSchema = z.object(hitShape).refine(validChunkQuote, 'Semantic hits require an exact UTF-16 chunk quote.')
+  .refine(validContextKnowledge, 'Knowledge origins must match their source and derivation must match the entry kind.');
 
 function validTextRetrieval(result: { retrieval: { method: string }; hits: CanonicalHit[] }): boolean {
   return result.retrieval.method !== 'text' || result.hits.every(hit => hit.semanticSimilarity === null && !hit.provenance.chunk);
@@ -64,6 +98,7 @@ export const contextHitSchema = z.object({
   similarity: similaritySchema.describe('Legacy numeric field: cosine similarity for semantic hits, otherwise 0 as a text-only sentinel.'),
   retrievalMethod: retrievalMethodSchema,
 }).refine(validChunkQuote, 'Semantic hits require an exact UTF-16 chunk quote.')
+  .refine(validContextKnowledge, 'Knowledge origins must match their source and derivation must match the entry kind.')
   .refine(hit => hit.similarity === (hit.semanticSimilarity ?? 0), 'Legacy similarity must agree with semanticSimilarity.');
 
 export const contextSearchSchema = z.object({

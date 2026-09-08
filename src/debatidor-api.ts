@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   canonicalContextSearchSchema,
   contextIndexSchema,
@@ -19,6 +20,16 @@ import {
   contextProjectsInputSchema, replaceContextProjectSourcesSchema,
   type CreateContextProjectInput, type ContextProjectsInput, type ReplaceContextProjectSourcesInput,
 } from './context-project-contracts.js';
+import {
+  createContextSessionInputSchema, contextSessionsInputSchema, getContextSessionInputSchema,
+  appendContextSessionInputSchema, contextSessionSchema, contextSessionCreatedSchema,
+  contextSessionsSchema, contextEventsSchema, contextEventAdmissionSchema,
+  createContextDeclarationInputSchema, contextDeclarationAdmissionSchema, contextDeclarationSchema,
+  contextRawOriginInputSchema, contextRawOriginSchema, contextSearchInputSchema,
+  contextStatusSchema,
+  type CreateContextSessionInput, type ContextSessionsInput, type GetContextSessionInput,
+  type AppendContextSessionInput, type CreateContextDeclarationInput, type ContextRawOriginInput,
+} from './context-knowledge-contracts.js';
 export type { ContextKind, ContextHit, ContextSearchResult, IndexDebateContextResult } from './context-contracts.js';
 
 export type DebateSummary = {
@@ -50,6 +61,7 @@ export type LeadStatus = {
 export type SearchContextInput = {
   query: string;
   debateId?: string;
+  sourceIds?: string[];
   kinds?: ContextKind[];
   limit?: number;
 };
@@ -162,11 +174,13 @@ export class DebatidorApiClient {
   }
 
   async searchContext(input: SearchContextInput): Promise<ContextSearchResult> {
+    input = contextSearchInputSchema.parse(input);
     const result = await this.request<unknown>('/context/search', {
       method: 'POST',
       body: {
         query: input.query,
         debateId: input.debateId,
+        sourceIds: input.sourceIds,
         // Preserve the original MCP scope even though Context Service supports
         // more kinds by default. New kinds must be requested explicitly.
         kinds: input.kinds?.length ? input.kinds : ['MESSAGE', 'CONCLUSION'],
@@ -174,7 +188,9 @@ export class DebatidorApiClient {
       },
     });
     const parsed = canonicalContextSearchSchema.safeParse(result);
-    if (!parsed.success || (input.debateId && parsed.data.hits.some((hit) => hit.debateId !== input.debateId))) {
+    if (!parsed.success || (input.debateId && parsed.data.hits.some((hit) => hit.debateId !== input.debateId)) ||
+        (input.sourceIds && parsed.data.hits.some(hit => !input.sourceIds!.includes(hit.sourceId))) ||
+        parsed.data.hits.some(hit => hit.provenance.origins?.some(origin => origin.sourceId !== hit.sourceId))) {
       throw new DebatidorApiError('debatidor_context_response_invalid', 502, 'context_response_invalid');
     }
     return {
@@ -218,7 +234,7 @@ export class DebatidorApiClient {
   async getContextItem(itemId: string) {
     const id = contextIdSchema.parse(itemId);
     const result = parseContext(contextItemSchema, await this.request(`/context/items/${encodeURIComponent(id)}`, { expectedStatus: 200 }));
-    if (result.id !== id) throw invalidContextResponse();
+    if (result.id !== id || result.provenance.origins?.some(origin => origin.sourceId !== result.sourceId)) throw invalidContextResponse();
     return result;
   }
 
@@ -250,7 +266,8 @@ export class DebatidorApiClient {
     const expectedLength = Math.min(100, result.itemCount - offset);
     const expectedNext = offset + result.entries.length < result.itemCount ? String(offset + result.entries.length) : null;
     if (result.id !== id || !Number.isSafeInteger(offset) || offset < 0 || offset % 100 !== 0 ||
-        offset >= Math.max(1, result.itemCount) || result.entries.length !== expectedLength || result.nextCursor !== expectedNext) {
+        offset >= Math.max(1, result.itemCount) || result.entries.length !== expectedLength || result.nextCursor !== expectedNext ||
+        result.entries.some(entry => entry.provenance.origins?.some(origin => origin.sourceId !== entry.sourceId))) {
       throw invalidContextResponse();
     }
     return result;
@@ -329,6 +346,87 @@ export class DebatidorApiClient {
     return parseContext(contextExportDeletedSchema, await this.request(`/context/projects/${encodeURIComponent(id)}`, {
       method: 'DELETE', expectedStatus: 200,
     }));
+  }
+
+  async createContextSession(input: CreateContextSessionInput) {
+    input = createContextSessionInputSchema.parse(input);
+    const response = await this.requestWithStatus('/context/sessions', { method: 'POST', body: input });
+    const result = parseContext(contextSessionCreatedSchema, response.data);
+    if (response.status !== (result.duplicate ? 200 : 201) || result.label !== input.label ||
+        (result.duplicate && input.clientSessionId === undefined) || (!result.duplicate && (result.nextSequence !== 1 || result.closedAt !== null))) throw invalidContextResponse();
+    return result;
+  }
+
+  async listContextSessions(input: ContextSessionsInput = {}) {
+    input = contextSessionsInputSchema.parse(input);
+    const query = new URLSearchParams();
+    if (input.cursor !== undefined) query.set('cursor', input.cursor);
+    if (input.limit !== undefined) query.set('limit', String(input.limit));
+    if (input.projectId !== undefined) query.set('projectId', input.projectId);
+    const result = parseContext(contextSessionsSchema, await this.request(`/context/sessions${query.size ? `?${query}` : ''}`, { expectedStatus: 200 }));
+    if (result.sessions.length > (input.limit ?? 50) || (result.nextCursor !== null && result.nextCursor === input.cursor)) throw invalidContextResponse();
+    return result;
+  }
+
+  async getContextSession(input: GetContextSessionInput) {
+    input = getContextSessionInputSchema.parse(input);
+    const path = `/context/sessions/${encodeURIComponent(input.sessionId)}`;
+    const query = new URLSearchParams();
+    if (input.cursor !== undefined) query.set('cursor', input.cursor);
+    if (input.limit !== undefined) query.set('limit', String(input.limit));
+    // Both reads must succeed before any metadata or transcript is returned.
+    const transcript = parseContext(contextEventsSchema, await this.request(`${path}/events${query.size ? `?${query}` : ''}`, { expectedStatus: 200 }));
+    const session = parseContext(contextSessionSchema, await this.request(path, { expectedStatus: 200 }));
+    if (session.id !== input.sessionId || transcript.throughSequence >= session.nextSequence ||
+        transcript.events.length > (input.limit ?? 50) || (transcript.nextCursor !== null && transcript.nextCursor === input.cursor) ||
+        transcript.events.some(event => event.sessionId !== session.id || event.sourceId !== session.sourceId)) throw invalidContextResponse();
+    return { session, transcript };
+  }
+
+  async appendContextSession(input: AppendContextSessionInput) {
+    input = appendContextSessionInputSchema.parse(input);
+    const { sessionId, ...body } = input;
+    const response = await this.requestWithStatus(`/context/sessions/${encodeURIComponent(sessionId)}/events`, { method: 'POST', body });
+    const result = parseContext(contextEventAdmissionSchema, response.data);
+    if (response.status !== (result.duplicate ? 200 : 201) || result.event.sessionId !== sessionId ||
+        result.event.clientEventId !== body.clientEventId || result.event.role !== body.role || result.event.content !== body.content) throw invalidContextResponse();
+    return result;
+  }
+
+  async closeContextSession(sessionId: string) {
+    const id = contextIdSchema.parse(sessionId);
+    const result = parseContext(contextSessionSchema, await this.request(`/context/sessions/${encodeURIComponent(id)}/close`, { method: 'POST', expectedStatus: 200 }));
+    if (result.id !== id || result.closedAt === null) throw invalidContextResponse();
+    return result;
+  }
+
+  async createContextDeclaration(input: CreateContextDeclarationInput) {
+    input = createContextDeclarationInputSchema.parse(input);
+    const response = await this.requestWithStatus('/context/declarations', { method: 'POST', body: input });
+    const result = parseContext(contextDeclarationAdmissionSchema, response.data);
+    if (response.status !== (result.duplicate ? 200 : 201) || result.sourceId !== input.sourceId ||
+        result.kind !== input.kind || result.itemId !== `ctx:declaration:${result.id}`) throw invalidContextResponse();
+    return result;
+  }
+
+  async getContextDeclaration(declarationId: string) {
+    const id = contextIdSchema.parse(declarationId);
+    const result = parseContext(contextDeclarationSchema, await this.request(`/context/declarations/${encodeURIComponent(id)}`, { expectedStatus: 200 }));
+    if (result.id !== id || result.itemId !== `ctx:declaration:${id}` || result.origins.some(origin => origin.sourceId !== result.sourceId || origin.endUtf16 <= origin.startUtf16)) throw invalidContextResponse();
+    return result;
+  }
+
+  async getContextRawOrigin(input: ContextRawOriginInput) {
+    input = contextRawOriginInputSchema.parse(input);
+    const result = parseContext(contextRawOriginSchema, await this.request(`/context/origins/${input.rawType}/${encodeURIComponent(input.rawId)}/revisions/${input.revision}`, { expectedStatus: 200 }));
+    if (result.rawType !== input.rawType || result.rawId !== input.rawId || result.revision !== input.revision ||
+        (result.rawType === 'SESSION_EVENT' && result.revision !== 1) ||
+        result.contentHash !== createHash('sha256').update(result.content).digest('hex')) throw invalidContextResponse();
+    return result;
+  }
+
+  async getContextStatus() {
+    return parseContext(contextStatusSchema, await this.request('/context/status', { expectedStatus: 200 }));
   }
 
   async executeAgent(input: AgentExecutionInput): Promise<AgentExecutionResult> {

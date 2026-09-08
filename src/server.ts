@@ -9,11 +9,13 @@ import {
   type LeadStatus,
   type QuickDebateResult,
 } from './debatidor-api.js';
-import { contextSearchSchema, contextIndexSchema, contextKindSchema } from './context-contracts.js';
+import { contextSearchSchema, contextIndexSchema } from './context-contracts.js';
 import { registerContextGovernanceTools } from './context-governance-tools.js';
 import { registerContextProjectTools } from './context-project-tools.js';
+import { registerContextKnowledgeTools } from './context-knowledge-tools.js';
+import { contextSearchInputSchema } from './context-knowledge-contracts.js';
 
-export const SERVER_VERSION = '0.7.6';
+export const SERVER_VERSION = '0.7.7';
 export const PROTOCOL_VERSION = '2026-07-28';
 
 export type DebatidorServerOptions = {
@@ -127,6 +129,7 @@ export function createDebatidorServer(options: DebatidorServerOptions): McpServe
     registerIndexContextTool(server, options.api);
     registerContextGovernanceTools(server, options.api, safeContextError);
     registerContextProjectTools(server, options.api, safeContextError);
+    registerContextKnowledgeTools(server, options.api, safeContextError);
     registerQuickDebateTool(server, options.api);
     registerAgentTools(server, options.api);
   }
@@ -176,32 +179,8 @@ function registerSearchContextTool(server: McpServer, api: DebatidorApiClient) {
     {
       title: 'Search Debatidor context',
       description:
-        'Search context stored by Debatidor in the authenticated workspace. Defaults to MESSAGE and CONCLUSION for compatibility; explicitly request FACT, DECISION or SUMMARY to include those kinds. Optionally scope results to one debate. Results identify text or hybrid retrieval, relevance score, semantic availability and source provenance. Semantic matches include an exact source excerpt with UTF-16 chunk positions. Text search remains available when semantic retrieval is warming, busy or unavailable. This is read-only; indexing is not a prerequisite.',
-      inputSchema: z.object({
-        query: z
-          .string()
-          .trim()
-          .min(1)
-          .max(2000)
-          .describe('Query to search context stored by Debatidor.'),
-        debateId: z
-          .string()
-          .min(1)
-          .optional()
-          .describe('Optional debate id to restrict results to one arena.'),
-        kinds: z
-          .array(contextKindSchema)
-          .max(5)
-          .optional()
-          .describe('Optional memory kinds: MESSAGE, CONCLUSION, FACT, DECISION, SUMMARY. Omitted or empty uses MESSAGE and CONCLUSION; request newer kinds explicitly.'),
-        limit: z
-          .number()
-          .int()
-          .min(1)
-          .max(10)
-          .optional()
-          .describe('Maximum number of context matches. Defaults to the backend limit.'),
-      }),
+        'Search authorized Debatidor context. Defaults to MESSAGE and CONCLUSION; explicitly request FACT, DECISION or SUMMARY to include them. Scope to one debateId OR 1–100 unique sourceIds, never both; source selection never grants access. Session sources are owner-only. Results preserve exact UTF-16 provenance, optional derivation method and coverage. Extractive summaries quote considered input; declared assertions are not independently verified facts. Semantic matches include exact chunk positions. Text retrieval remains available when semantic retrieval is unavailable. Read-only; indexing is not a prerequisite.',
+      inputSchema: contextSearchInputSchema,
       outputSchema: contextSearchSchema,
       annotations: {
         readOnlyHint: true,
@@ -210,9 +189,9 @@ function registerSearchContextTool(server: McpServer, api: DebatidorApiClient) {
         openWorldHint: false,
       },
     },
-    async ({ query, debateId, kinds, limit }) => {
+    async ({ query, debateId, sourceIds, kinds, limit }) => {
       try {
-        const context = await api.searchContext({ query, debateId, kinds, limit });
+        const context = await api.searchContext({ query, debateId, sourceIds, kinds, limit });
         const result = { query, hitCount: context.hits.length, ...context };
         return {
           content: [{ type: 'text', text: formatContextSearch(query, context) }],
@@ -580,6 +559,18 @@ function safeContextError(error: unknown) {
       context_item_not_found: 'That memory item is unavailable in your authorized scope (missing, deleted, expired or inaccessible).',
       context_source_not_found: 'That memory source is unavailable in your authorized scope.',
       context_project_not_found: 'That private memory project is unavailable to the authenticated account in this workspace.',
+      context_session_not_found: 'That private raw session is unavailable to the authenticated account.',
+      context_session_closed: 'That raw session is closed and no longer accepts new events. Its history is preserved.',
+      context_session_id_conflict: 'That clientSessionId already identifies a different session creation request. Do not silently generate a new identifier or retry.',
+      context_event_id_conflict: 'That clientEventId already identifies different content or role. Read the original event before any explicitly requested correction.',
+      context_declaration_id_conflict: 'That clientDeclarationId already identifies a different declaration. Do not silently replace it or retry.',
+      context_declaration_not_found: 'That declaration is unavailable to the authenticated account.',
+      context_origin_not_found: 'That raw origin revision is unavailable to the authenticated account.',
+      context_origin_stale: 'The cited message revision is no longer current. Read the current raw revision before explicitly creating a declaration.',
+      context_origin_forgotten: 'That raw origin was excluded from derived memory and cannot support a new declaration.',
+      context_origin_span_invalid: 'Use exact nonempty UTF-16 spans within the raw revision without splitting a Unicode character.',
+      context_capture_too_large: 'The captured content exceeds the endpoint byte limit. No clipped content was stored by this tool.',
+      context_session_quota: 'The open private session limit was reached. Explicitly close an unneeded session before creating another.',
       context_project_quota: 'The private context project limit was reached. Remove an unneeded collection before explicitly creating another.',
       context_project_name_invalid: 'Use a project name with 1–120 trimmed characters and no control characters.',
       context_export_not_found: 'That export is unavailable to the authenticated account.',

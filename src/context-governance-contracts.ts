@@ -1,5 +1,5 @@
 import * as z from 'zod/v4';
-import { contextKindSchema } from './context-contracts.js';
+import { contextKindSchema, contextOriginsSchema, contextDerivationSchema, validContextKnowledge } from './context-contracts.js';
 
 // Accept additional upstream fields for forward compatibility, but only return
 // the declared projection. Unknown fields (vectors, jobs, etc.) are stripped.
@@ -26,6 +26,7 @@ const provenanceSchema = z.object({
   sourceRevision: z.number().int().positive(),
   originType: z.string().min(1),
   originId: z.string().min(1),
+  origins: contextOriginsSchema.optional(),
 });
 export const contextEntrySchema = z.object({
   id: z.string().min(1),
@@ -36,8 +37,9 @@ export const contextEntrySchema = z.object({
   content: z.string(),
   createdAt: z.iso.datetime({ offset: true }),
   provenance: provenanceSchema,
-});
-export const contextItemSchema = contextEntrySchema.extend({ canDelete: z.boolean() });
+  derivation: contextDerivationSchema.optional(),
+}).refine(validContextKnowledge, 'Knowledge origins must match their source and derivation must match the entry kind.');
+export const contextItemSchema = contextEntrySchema.safeExtend({ canDelete: z.boolean() });
 export const contextSourcesSchema = z.object({
   sources: z.array(z.object({
     id: z.string().min(1),
