@@ -5,11 +5,21 @@ import { contextKindSchema } from './context-contracts.js';
 // the declared projection. Unknown fields (vectors, jobs, etc.) are stripped.
 export const contextIdSchema = z.string().trim().min(1).max(500)
   .refine(id => id !== '.' && id !== '..' && !/[\u0000-\u001f\u007f]/.test(id), 'Invalid context id.');
-export const contextScopeSchema = z.object({ type: z.enum(['user', 'workspace']) });
+export const contextScopeSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.enum(['user', 'workspace']), projectId: z.never().optional() }),
+  z.object({ type: z.literal('project'), projectId: contextIdSchema }),
+]);
 export const contextSourceIdsSchema = z.array(contextIdSchema).min(1).max(100);
 export const contextSourceCursorSchema = z.string().regex(/^[A-Za-z0-9_-]{1,1000}$/);
 export const contextExportCursorSchema = z.string().regex(/^(0|[1-9][0-9]{0,8})$/)
   .refine(cursor => Number(cursor) % 100 === 0, 'Use the nextCursor returned by the export.');
+export const contextSourcesInputSchema = z.object({
+  scope: z.enum(['user', 'workspace', 'project']).optional(),
+  projectId: contextIdSchema.optional(),
+  cursor: contextSourceCursorSchema.optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+}).refine(input => (input.scope === 'project') === (input.projectId !== undefined),
+  'A project scope requires projectId; other scopes must omit it.');
 
 const provenanceSchema = z.object({
   messageId: z.string().min(1).nullable(),
@@ -118,7 +128,8 @@ export const contextGovernanceSchema = z.object({
   deletion: z.object({ mode: z.literal('derived'), downloadedCopies: z.literal('outside_service_control') }),
 });
 
-export type ContextSourcesInput = { scope?: 'user' | 'workspace'; cursor?: string; limit?: number };
+export type ContextScope = z.infer<typeof contextScopeSchema>;
+export type ContextSourcesInput = z.infer<typeof contextSourcesInputSchema>;
 export type CreateContextExportInput = z.infer<typeof createContextExportSchema>;
 export type ReadContextExportInput = { exportId: string; cursor?: string };
 export type DeleteContextSourcesInput = z.infer<typeof deleteContextSourcesSchema>;
