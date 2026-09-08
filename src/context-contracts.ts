@@ -12,11 +12,30 @@ const chunkSchema = z.object({
   endUtf16: z.number().int().positive(),
 }).refine(chunk => chunk.endUtf16 > chunk.startUtf16, 'Chunk end must follow its start.');
 
+export const contextRawTypeSchema = z.enum(['MESSAGE', 'SESSION_EVENT']);
+const originId = z.string().min(1).max(500).refine(id => id === id.trim() && !/[\u0000-\u001f\u007f]/.test(id) &&
+  [...id].every(char => char.length === 2 || char.charCodeAt(0) < 0xd800 || char.charCodeAt(0) > 0xdfff), 'Invalid provenance identifier.');
+export const contextOriginSchema = z.object({
+  rawType: contextRawTypeSchema,
+  rawId: originId,
+  sourceId: originId,
+  revision: z.number().int().positive(),
+  startUtf16: z.number().int().nonnegative(),
+  endUtf16: z.number().int().nonnegative(),
+}).refine(origin => origin.endUtf16 >= origin.startUtf16, 'Origin spans use UTF-16 offsets; an unquoted considered input may have an empty span.');
+export const contextOriginsSchema = z.array(contextOriginSchema).min(1).max(32);
+export const contextDerivationSchema = z.object({
+  method: z.enum(['verbatim', 'extractive', 'declared']),
+  pipelineVersion: z.literal(1),
+  coverage: z.record(z.string(), z.union([z.number().describe('Numeric coverage metric.'), z.boolean().describe('Coverage flag.')])).optional(),
+});
+
 export const contextProvenanceSchema = z.object({
   messageId: z.string().min(1).nullable(),
   sourceRevision: z.number().int().positive(),
   originType: z.string().min(1),
   originId: z.string().min(1),
+  origins: contextOriginsSchema.optional(),
   chunk: chunkSchema.optional(),
 });
 
@@ -36,6 +55,7 @@ const hitShape = {
   score: z.number().nonnegative(),
   semanticSimilarity: similaritySchema.nullable(),
   createdAt: z.iso.datetime({ offset: true }),
+  derivation: contextDerivationSchema.optional(),
   provenance: contextProvenanceSchema,
 };
 type CanonicalHit = z.infer<z.ZodObject<typeof hitShape>>;

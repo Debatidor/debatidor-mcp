@@ -30,7 +30,7 @@ El endpoint remoto es el camino de producto. `stdio` se conserva para clientes l
 
 ## Estado actual
 
-Versión `0.7.6`:
+Versión `0.7.7`:
 
 - MCP TypeScript SDK v2, revisión objetivo `2026-07-28`;
 - Streamable HTTP stateless en `/mcp`;
@@ -42,6 +42,7 @@ Versión `0.7.6`:
 - `debatidor_search_context` / `debatidor_index_context` sobre Context Service, la memoria propia de Debatidor;
 - lectura completa, fuentes, exportación paginada, borrado derivado y política de memoria mediante las herramientas `context`;
 - proyectos privados de contexto para agrupar fuentes y seleccionar exportaciones sin ampliar permisos;
+- sesiones privadas con eventos raw, declaraciones explícitas con citas y estado operativo de materialización;
 - `debatidor_quick_debate` para inyectar una intervención en una Arena existente;
 - `debatidor_agent_list/read/write/shell` para operar un proyecto conectado por `debatidor-agent` sin DOM;
 - bridge API-key legacy solo para dogfooding local/privado.
@@ -140,7 +141,7 @@ Lee Arenas `LEAD` visibles en el workspace del principal OAuth. Con `debateId`, 
 
 ### `debatidor_search_context`
 
-Búsqueda read-only del contexto del workspace autenticado, opcionalmente limitada a una Arena. Conserva los inputs `query` (requerido), `debateId`, `kinds` y `limit`; no requiere ejecutar previamente la tool de indexación.
+Búsqueda read-only del contexto autorizado, opcionalmente limitada a una Arena con `debateId` o a 1–100 `sourceIds` únicos. Ambos filtros son excluyentes; elegir fuentes no concede acceso a sesiones privadas ajenas. Conserva `query` (requerido), `kinds` y `limit`; no requiere ejecutar previamente la tool de indexación.
 
 `kinds` acepta `MESSAGE`, `CONCLUSION`, `FACT`, `DECISION` y `SUMMARY`. Para mantener las consultas de clientes anteriores, si se omite o se envía `[]`, el MCP manda explícitamente `['MESSAGE', 'CONCLUSION']` al backend. Los tipos nuevos se incluyen solo al solicitarlos: por ejemplo, `kinds: ['FACT', 'DECISION', 'SUMMARY']`; para los cinco tipos, envía los cinco valores. Los clientes que pidan tipos nuevos deben aceptar esos valores en los resultados.
 
@@ -181,7 +182,7 @@ Estas herramientas reutilizan la misma identidad autenticada y permisos de Conte
 | `debatidor_get_context_governance` | `{}` | `GET /context/governance`: retención, límites de exports, cuotas operativas y alcance del borrado |
 | `debatidor_delete_context_sources` | `mode: "derived"`, `scope`, `sourceIds` | `POST /context/deletions`: borra memoria derivada existente de una selección explícita de 1–100 fuentes |
 
-La lectura completa y las exportaciones conservan `id`, `sourceId`, `debateId`, `kind`, `content`, `createdAt` y `provenance: { messageId, sourceRevision, originType, originId }`. No aplican los límites de snippets de búsqueda, ni incluyen embeddings, razonamiento, credenciales, jobs internos o `provenance.chunk`. La lectura individual añade `canDelete`; el snapshot lo omite porque los permisos pueden cambiar. El contenido seleccionado puede contener datos personales escritos por el usuario: no se redacta automáticamente.
+La lectura completa y las exportaciones conservan `id`, `sourceId`, `debateId`, `kind`, `content`, `createdAt` y `provenance: { messageId, sourceRevision, originType, originId, origins? }`, junto con `derivation` cuando existe. No aplican los límites de snippets de búsqueda, ni incluyen embeddings, razonamiento, credenciales, jobs internos o `provenance.chunk`. La lectura individual añade `canDelete`; el snapshot lo omite porque los permisos pueden cambiar. El contenido seleccionado puede contener datos personales escritos por el usuario: no se redacta automáticamente.
 
 Crear un export requiere un scope y formato explícitos. `sourceIds` opcional selecciona 1–100 fuentes; al omitirlo, se incluyen las fuentes autorizadas del scope. `kinds` omitido incluye los cinco tipos, a diferencia del default compatible de `search_context`. La respuesta es `{ id, schemaVersion: 1, scope, format, itemCount, pageCount, expiresAt }`, sin host de descarga. Cada llamada crea un snapshot nuevo: no es idempotente.
 
@@ -214,6 +215,34 @@ Para seleccionar un proyecto en exportaciones y borrado derivado, pasa `scope: {
 Un reemplazo de fuentes falla completo si alguna no está autorizada. Cambiar la selección afecta las exportaciones nuevas; un snapshot congelado conserva las fuentes admitidas mientras sigan autorizadas. Cada página revalida también la existencia y propiedad del proyecto. Eliminarlo invalida snapshots anteriores con HTTP 410 y no borra las copias ya descargadas o proyectadas a archivos locales. Borrar memoria derivada desde un proyecto mantiene los permisos de cada fuente: agrupar fuentes compartidas no permite a un miembro borrar lo reservado al OWNER.
 
 Las lecturas son de solo lectura. Crear una colección es una mutación no idempotente. Reemplazar enlaces es destructivo sobre la selección e idempotente, aunque preserva contenido; eliminar la colección es destructivo y se marca no idempotente porque repetirlo devuelve 404. Ninguna mutación se reintenta automáticamente. Los parsers rechazan una respuesta de otro proyecto, selecciones incompletas, IDs duplicados, paginación contradictoria o éxito HTTP inesperado; no devuelven campos internos adicionales del backend.
+
+### Sesiones raw, declaraciones y procedencia
+
+Estas nueve herramientas requieren las rutas P11 `/context/sessions`, `/context/declarations`, `/context/origins` y `/context/status`. Las sesiones son historial privado del usuario autenticado; no crean Arenas ni conexiones de agente. Captura solo contenido autorizado, con el rol indicado explícitamente por el llamador.
+
+| Herramienta | Entrada | Operación |
+|---|---|---|
+| `debatidor_create_context_session` | `label`, `projectId?`, `clientSessionId?` | Crea una sesión privada y opcionalmente la vincula a un proyecto propio |
+| `debatidor_list_context_sessions` | `projectId?`, `cursor?`, `limit?` | Lista sesiones propias, 50 por defecto y máximo 100 |
+| `debatidor_get_context_session` | `sessionId`, `cursor?`, `limit?` | Dos lecturas autorizadas: página de eventos y metadatos; devuelve `{session, transcript}` únicamente si ambas terminan bien |
+| `debatidor_append_context_session` | `sessionId`, `clientEventId`, `role`, `content` | Guarda un evento exacto; `role` es HUMAN, ASSISTANT, TOOL o SYSTEM; máximo 32768 bytes UTF-8 |
+| `debatidor_close_context_session` | `sessionId` | Impide nuevos eventos; conserva historial y memoria |
+| `debatidor_create_context_declaration` | `clientDeclarationId`, `sourceId`, `kind`, `content`, `origins` | Registra FACT, DECISION o CONCLUSION declarados, máximo 24000 bytes UTF-8, con 1–32 citas de una misma fuente |
+| `debatidor_get_context_declaration` | `declarationId` | Lee la declaración raw y su estado current, stale o forgotten |
+| `debatidor_get_context_raw_origin` | `rawType`, `rawId`, `revision` | Lee una revisión autorizada MESSAGE o SESSION_EVENT y verifica SHA-256 de su contenido |
+| `debatidor_get_context_status` | `{}` | Estado semántico y contadores operativos de raw, resúmenes y cola de conocimiento |
+
+`queued` confirma la admisión durable del raw, sin afirmar que terminó la materialización. Los resúmenes se generan automáticamente mediante extracción propia; no requieren BYOK. FACT, DECISION y CONCLUSION son afirmaciones declaradas con procedencia, no clasificaciones automáticas ni verificación factual independiente.
+
+`clientEventId` y `clientDeclarationId` son obligatorios. Repetirlos explícitamente con el mismo contenido conserva el registro; cambiar la petición devuelve conflicto. `clientSessionId` permite repetir explícitamente la creación con el mismo label/proyecto; omitirlo crea una sesión nueva en cada llamada. Ninguna mutación se reintenta automáticamente y una respuesta inválida no permite inferir finalización. Los límites de contenido se validan en bytes UTF-8 sin recortarlo.
+
+Para recorrer un transcript, pasa `transcript.nextCursor` sin modificarlo hasta recibir `null`. La página fija `throughSequence`; los eventos nuevos se leen iniciando otra primera página. Si se revoca el acceso entre las dos lecturas, la herramienta falla completa sin devolver metadatos ni transcript parciales. Cerrar o borrar memoria derivada conserva el historial raw autorizado.
+
+Las búsquedas, lecturas y exportaciones preservan `provenance.origins?: [{rawType, rawId, sourceId, revision, startUtf16, endUtf16}]` y `derivation?: {method, pipelineVersion: 1, coverage?}`. Los offsets cuentan unidades UTF-16, con fin excluido. Una declaración exige citas no vacías sobre revisiones actuales; consulta primero `get_context_raw_origin` y respeta los límites Unicode. Un resumen puede registrar un rango vacío `0..0` para un input considerado sin cita. `coverage` contiene solo contadores y booleanos; describe cobertura, no confianza factual. `method` es `verbatim`, `extractive` o `declared`. El contrato anterior sin estos campos sigue siendo válido; `null`, spans invertidos, procedencia de otra fuente y metadata malformada se rechazan.
+
+`knowledge` en status conserva conteos y bytes raw, mensajes pendientes de preparar para conocimiento (`raw.pendingMessageHydration`), resúmenes vigentes/obsoletos/olvidados y cola pendiente/en ejecución/fallida, con antigüedad y p95 de finalización. El historial de trabajos completados se conserva siete días; esos contadores no representan toda la vida del producto. Un backend anterior sin `knowledge` no se interpreta como cero.
+
+La suite cubre contratos y transporte HTTP MCP con una Context API HTTP simulada, incluidos permisos denegados, reintentos explícitos, respuestas malformadas y revocación entre lecturas. No representa una nueva validación de ChatGPT o Claude ni una prueba Nest/PostgreSQL; esas pruebas pertenecen al backend.
 
 ### `debatidor_quick_debate`
 
