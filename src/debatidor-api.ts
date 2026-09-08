@@ -7,12 +7,18 @@ import {
 } from './context-contracts.js';
 import type * as z from 'zod/v4';
 import {
-  contextIdSchema, contextItemSchema, contextSourcesSchema,
+  contextIdSchema, contextItemSchema, contextSourcesSchema, contextSourcesInputSchema,
   contextExportSchema, contextExportPageSchema, contextExportDeletedSchema,
   contextItemDeletedSchema, contextDeletionSchema, contextGovernanceSchema,
   type ContextSourcesInput, type CreateContextExportInput,
-  type ReadContextExportInput, type DeleteContextSourcesInput,
+  createContextExportSchema, deleteContextSourcesSchema,
+  type ReadContextExportInput, type DeleteContextSourcesInput, type ContextScope,
 } from './context-governance-contracts.js';
+import {
+  createContextProjectSchema, contextProjectSchema, contextProjectsSchema,
+  contextProjectsInputSchema, replaceContextProjectSourcesSchema,
+  type CreateContextProjectInput, type ContextProjectsInput, type ReplaceContextProjectSourcesInput,
+} from './context-project-contracts.js';
 export type { ContextKind, ContextHit, ContextSearchResult, IndexDebateContextResult } from './context-contracts.js';
 
 export type DebateSummary = {
@@ -217,19 +223,22 @@ export class DebatidorApiClient {
   }
 
   async listContextSources(input: ContextSourcesInput = {}) {
+    input = contextSourcesInputSchema.parse(input);
     const query = new URLSearchParams({ scope: input.scope ?? 'user' });
+    if (input.projectId !== undefined) query.set('projectId', input.projectId);
     if (input.cursor !== undefined) query.set('cursor', input.cursor);
     if (input.limit !== undefined) query.set('limit', String(input.limit));
     const result = parseContext(contextSourcesSchema, await this.request(`/context/sources?${query}`, { expectedStatus: 200 }));
-    const visibility = (input.scope ?? 'user') === 'user' ? 'PRIVATE' : 'WORKSPACE';
-    if (result.sources.length > (input.limit ?? 50) || result.sources.some(source => source.visibility !== visibility) ||
+    const visibility = input.scope === 'project' ? null : (input.scope ?? 'user') === 'user' ? 'PRIVATE' : 'WORKSPACE';
+    if (result.sources.length > (input.limit ?? 50) || (visibility !== null && result.sources.some(source => source.visibility !== visibility)) ||
         (result.nextCursor !== null && result.nextCursor === input.cursor)) throw invalidContextResponse();
     return result;
   }
 
   async createContextExport(input: CreateContextExportInput) {
+    input = createContextExportSchema.parse(input);
     const result = parseContext(contextExportSchema, await this.request('/context/exports', { method: 'POST', body: input, expectedStatus: 201 }));
-    if (result.scope.type !== input.scope.type || result.format !== input.format) throw invalidContextResponse();
+    if (!sameContextScope(result.scope, input.scope) || result.format !== input.format) throw invalidContextResponse();
     return result;
   }
 
@@ -268,14 +277,58 @@ export class DebatidorApiClient {
   }
 
   async deleteContextSources(input: DeleteContextSourcesInput) {
+    input = deleteContextSourcesSchema.parse(input);
     const result = parseContext(contextDeletionSchema, await this.request('/context/deletions', { method: 'POST', body: input, expectedStatus: 201 }));
-    if (result.scope.type !== input.scope.type || result.sourceIds.length !== new Set(input.sourceIds).size ||
+    if (!sameContextScope(result.scope, input.scope) || result.sourceIds.length !== new Set(input.sourceIds).size ||
         result.sourceIds.some(id => !input.sourceIds.includes(id))) throw invalidContextResponse();
     return result;
   }
 
   async getContextGovernance() {
     return parseContext(contextGovernanceSchema, await this.request('/context/governance', { expectedStatus: 200 }));
+  }
+
+  async createContextProject(input: CreateContextProjectInput) {
+    input = createContextProjectSchema.parse(input);
+    const result = parseContext(contextProjectSchema, await this.request('/context/projects', { method: 'POST', body: input, expectedStatus: 201 }));
+    if (result.name !== input.name || result.sourceIds.length !== 0) throw invalidContextResponse();
+    return result;
+  }
+
+  async listContextProjects(input: ContextProjectsInput = {}) {
+    input = contextProjectsInputSchema.parse(input);
+    const query = new URLSearchParams();
+    if (input.cursor !== undefined) query.set('cursor', input.cursor);
+    if (input.limit !== undefined) query.set('limit', String(input.limit));
+    const suffix = query.size ? `?${query}` : '';
+    const result = parseContext(contextProjectsSchema, await this.request(`/context/projects${suffix}`, { expectedStatus: 200 }));
+    if (result.projects.length > (input.limit ?? 50) ||
+        (result.nextCursor !== null && result.nextCursor === input.cursor)) throw invalidContextResponse();
+    return result;
+  }
+
+  async getContextProject(projectId: string) {
+    const id = contextIdSchema.parse(projectId);
+    const result = parseContext(contextProjectSchema, await this.request(`/context/projects/${encodeURIComponent(id)}`, { expectedStatus: 200 }));
+    if (result.id !== id) throw invalidContextResponse();
+    return result;
+  }
+
+  async replaceContextProjectSources(input: ReplaceContextProjectSourcesInput) {
+    input = replaceContextProjectSourcesSchema.parse(input);
+    const result = parseContext(contextProjectSchema, await this.request(`/context/projects/${encodeURIComponent(input.projectId)}/sources`, {
+      method: 'PUT', body: { sourceIds: input.sourceIds }, expectedStatus: 200,
+    }));
+    if (result.id !== input.projectId || result.sourceIds.length !== input.sourceIds.length ||
+        result.sourceIds.some(id => !input.sourceIds.includes(id))) throw invalidContextResponse();
+    return result;
+  }
+
+  async deleteContextProject(projectId: string) {
+    const id = contextIdSchema.parse(projectId);
+    return parseContext(contextExportDeletedSchema, await this.request(`/context/projects/${encodeURIComponent(id)}`, {
+      method: 'DELETE', expectedStatus: 200,
+    }));
   }
 
   async executeAgent(input: AgentExecutionInput): Promise<AgentExecutionResult> {
@@ -292,14 +345,14 @@ export class DebatidorApiClient {
 
   private async request<T = unknown>(
     path: string,
-    options: { method?: 'GET' | 'POST' | 'DELETE'; body?: unknown; expectedStatus?: number } = {},
+    options: { method?: 'GET' | 'POST' | 'PUT' | 'DELETE'; body?: unknown; expectedStatus?: number } = {},
   ): Promise<T> {
     return (await this.requestWithStatus<T>(path, options)).data;
   }
 
   private async requestWithStatus<T = unknown>(
     path: string,
-    options: { method?: 'GET' | 'POST' | 'DELETE'; body?: unknown; expectedStatus?: number } = {},
+    options: { method?: 'GET' | 'POST' | 'PUT' | 'DELETE'; body?: unknown; expectedStatus?: number } = {},
   ): Promise<{ data: T; status: number }> {
     const headers: Record<string, string> = { accept: 'application/json' };
     if (this.auth.type === 'api-key') headers['x-api-key'] = this.auth.token;
@@ -353,6 +406,11 @@ export class DebatidorApiClient {
 
 function invalidContextResponse() {
   return new DebatidorApiError('debatidor_context_response_invalid', 502, 'context_response_invalid');
+}
+
+function sameContextScope(actual: ContextScope, expected: ContextScope): boolean {
+  return actual.type === expected.type &&
+    (actual.type !== 'project' || (expected.type === 'project' && actual.projectId === expected.projectId));
 }
 
 function parseContext<S extends z.ZodType>(schema: S, value: unknown): z.infer<S> {

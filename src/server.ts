@@ -11,8 +11,9 @@ import {
 } from './debatidor-api.js';
 import { contextSearchSchema, contextIndexSchema, contextKindSchema } from './context-contracts.js';
 import { registerContextGovernanceTools } from './context-governance-tools.js';
+import { registerContextProjectTools } from './context-project-tools.js';
 
-export const SERVER_VERSION = '0.7.5';
+export const SERVER_VERSION = '0.7.6';
 export const PROTOCOL_VERSION = '2026-07-28';
 
 export type DebatidorServerOptions = {
@@ -125,6 +126,7 @@ export function createDebatidorServer(options: DebatidorServerOptions): McpServe
     registerSearchContextTool(server, options.api);
     registerIndexContextTool(server, options.api);
     registerContextGovernanceTools(server, options.api, safeContextError);
+    registerContextProjectTools(server, options.api, safeContextError);
     registerQuickDebateTool(server, options.api);
     registerAgentTools(server, options.api);
   }
@@ -577,15 +579,19 @@ function safeContextError(error: unknown) {
     const messages: Record<string, string> = {
       context_item_not_found: 'That memory item is unavailable in your authorized scope (missing, deleted, expired or inaccessible).',
       context_source_not_found: 'That memory source is unavailable in your authorized scope.',
+      context_project_not_found: 'That private memory project is unavailable to the authenticated account in this workspace.',
+      context_project_quota: 'The private context project limit was reached. Remove an unneeded collection before explicitly creating another.',
+      context_project_name_invalid: 'Use a project name with 1–120 trimmed characters and no control characters.',
       context_export_not_found: 'That export is unavailable to the authenticated account.',
       context_deletion_not_found: 'That deletion operation is unavailable to the authenticated account.',
       context_export_unavailable: 'The export is no longer available because it expired or its source access/content was removed. Do not combine earlier pages into a purported complete export.',
       context_export_quota: 'The active export snapshot limit was reached. Delete an existing export or wait for expiry before explicitly creating another.',
       context_export_too_large: 'The selected export exceeds the item or byte limit. Explicitly select fewer sources or kinds; no truncated export was returned.',
       context_workspace_owner_required: 'Only the current workspace owner can delete shared derived memory. Your account link may still be valid.',
-      context_scope_invalid: 'Select an explicit user or workspace scope.',
+      context_scope_invalid: 'Select user or workspace scope, or project scope with its projectId.',
       context_cursor_invalid: 'Use the nextCursor returned by the same source listing or export.',
-      context_sources_invalid: 'Select between 1 and 100 valid memory source ids.',
+      context_sources_invalid: 'Select valid memory source ids within the tool limits. An empty list is allowed only when explicitly clearing project links.',
+      context_limit_invalid: 'Select a page limit between 1 and 100.',
       context_kind_invalid: 'Select valid memory kinds: MESSAGE, CONCLUSION, FACT, DECISION or SUMMARY.',
       context_export_format_invalid: 'Select json or markdown export format.',
       context_deletion_mode_invalid: 'Only explicit derived memory deletion is supported; original history is preserved.',

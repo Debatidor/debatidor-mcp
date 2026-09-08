@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import type { DebatidorApiClient } from './debatidor-api.js';
 import {
-  contextIdSchema, contextSourceCursorSchema, contextExportCursorSchema,
+  contextIdSchema, contextSourcesInputSchema, contextExportCursorSchema,
   contextItemSchema, contextSourcesSchema, createContextExportSchema,
   contextExportSchema, contextExportPageSchema, contextExportDeletedSchema,
   contextItemDeletedSchema, contextDeletionSchema, contextGovernanceSchema,
@@ -30,12 +30,8 @@ export function registerContextGovernanceTools(
 
   server.registerTool('debatidor_list_context_sources', {
     title: 'List memory sources',
-    description: 'List one page of authorized memory sources. user (default) selects your private sources; workspace selects shared sources and never grants another user’s private memory. Pass nextCursor unchanged to read the next page. Listing does not export or delete content.',
-    inputSchema: z.object({
-      scope: z.enum(['user', 'workspace']).optional(),
-      cursor: contextSourceCursorSchema.optional(),
-      limit: z.number().int().min(1).max(100).optional(),
-    }),
+    description: 'List one page of authorized memory sources. user (default) selects your private sources; workspace selects shared sources; project requires projectId and selects the currently readable sources linked to your private collection. A project never grants access to another user\'s private memory. Pass nextCursor unchanged to read the next page with the same scope and projectId. Listing does not export or delete content.',
+    inputSchema: contextSourcesInputSchema,
     outputSchema: contextSourcesSchema, annotations: readAnnotations,
   }, async (input) => {
     try {
@@ -46,7 +42,7 @@ export function registerContextGovernanceTools(
 
   server.registerTool('debatidor_export_context', {
     title: 'Create a private memory export snapshot',
-    description: 'Create a private snapshot of full authorized memory entries in explicit user or workspace scope. Optional sourceIds selects at most 100 sources; omitted selects the scope. Kinds default to all five. Returns metadata only, without a download host; read pages with debatidor_read_context_export. Maximum 10,000 entries/32 MiB, 100 entries/page, one-hour expiry and three active snapshots per principal. Content is not automatically redacted. Creates a new snapshot on every call: never retry automatically.',
+    description: 'Create a private snapshot of full authorized memory entries in explicit user, workspace or project scope. project requires projectId and includes only currently readable linked sources; grouping never grants access. Optional sourceIds selects at most 100 sources within the scope; omitted selects the scope. Kinds default to all five. Returns metadata only; read pages with debatidor_read_context_export. Maximum 10,000 entries/32 MiB, 100 entries/page, one-hour expiry and three active snapshots per principal. Content is not automatically redacted. Creates a new snapshot on every call: never retry automatically.',
     inputSchema: createContextExportSchema,
     outputSchema: contextExportSchema,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -59,7 +55,7 @@ export function registerContextGovernanceTools(
 
   server.registerTool('debatidor_read_context_export', {
     title: 'Read one memory export page',
-    description: 'Read one complete page from your private export snapshot. Omit cursor for the first page; pass nextCursor unchanged thereafter until null. Each page has at most 100 full entries. For Markdown, concatenate the returned markdown strings literally in page order; JSON exports return markdown:null. Every page rechecks all referenced access and deletions; expiry or revoked/deleted sources invalidate the whole export. An empty export has one empty page. Downloaded copies are outside service control.',
+    description: 'Read one complete page from your private export snapshot. Omit cursor for the first page; pass nextCursor unchanged thereafter until null. Each page has at most 100 full entries. For Markdown, concatenate the returned markdown strings literally in page order; JSON exports return markdown:null. Every page rechecks all referenced access and project ownership/existence; expiry, revoked/deleted sources or project deletion invalidate the whole export. Ordinary project-link edits affect new exports; a frozen snapshot retains its admitted sources while authorized. An empty export has one empty page. Downloaded copies are outside service control.',
     inputSchema: z.object({ exportId: contextIdSchema, cursor: contextExportCursorSchema.optional() }),
     outputSchema: contextExportPageSchema, annotations: readAnnotations,
   }, async (input) => {
@@ -123,7 +119,7 @@ export function registerContextGovernanceTools(
 
   server.registerTool('debatidor_delete_context_sources', {
     title: 'Delete derived memory from selected sources',
-    description: 'Destructively forget all existing derived memory in explicitly selected sourceIds (1–100), with mode:derived and an explicit user or workspace scope. user covers only your private sources; workspace requires OWNER. Original messages and turns remain. New content created after admission remains allowed. Returns a deletion operation; check PENDING with debatidor_get_context_deletion. A new call creates a new operation and may cover newer content: never retry automatically. This tool requires a source selection and never implicitly selects every workspace source.',
+    description: 'Destructively forget all existing derived memory in explicitly selected sourceIds (1–100), with mode:derived and an explicit user, workspace or project scope. user covers only your private sources; workspace requires OWNER. project requires projectId and keeps the same source deletion rights: grouping shared sources never grants permission to delete them. Original messages and turns remain. New content created after admission remains allowed. Returns a deletion operation; check PENDING with debatidor_get_context_deletion. A new call creates a new operation and may cover newer content: never retry automatically. This tool requires a source selection and never implicitly selects every workspace or project source.',
     inputSchema: deleteContextSourcesSchema,
     outputSchema: contextDeletionSchema,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },

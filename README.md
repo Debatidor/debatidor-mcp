@@ -30,7 +30,7 @@ El endpoint remoto es el camino de producto. `stdio` se conserva para clientes l
 
 ## Estado actual
 
-Versión `0.7.5`:
+Versión `0.7.6`:
 
 - MCP TypeScript SDK v2, revisión objetivo `2026-07-28`;
 - Streamable HTTP stateless en `/mcp`;
@@ -41,6 +41,7 @@ Versión `0.7.5`:
 - `debatidor_ping` y `debatidor_get_lead_status`;
 - `debatidor_search_context` / `debatidor_index_context` sobre Context Service, la memoria propia de Debatidor;
 - lectura completa, fuentes, exportación paginada, borrado derivado y política de memoria mediante las herramientas `context`;
+- proyectos privados de contexto para agrupar fuentes y seleccionar exportaciones sin ampliar permisos;
 - `debatidor_quick_debate` para inyectar una intervención en una Arena existente;
 - `debatidor_agent_list/read/write/shell` para operar un proyecto conectado por `debatidor-agent` sin DOM;
 - bridge API-key legacy solo para dogfooding local/privado.
@@ -171,7 +172,7 @@ Estas herramientas reutilizan la misma identidad autenticada y permisos de Conte
 | Herramienta | Entrada | Resultado y operación |
 |---|---|---|
 | `debatidor_get_context_item` | `itemId` | `GET /context/items/:id`: contenido completo, procedencia y `canDelete` actual |
-| `debatidor_list_context_sources` | `scope?: "user"\|"workspace"`, `cursor?`, `limit?` | `GET /context/sources`: `sources` y `nextCursor`; scope por defecto `user`, 50 fuentes por defecto, máximo 100 |
+| `debatidor_list_context_sources` | `scope?: "user"\|"workspace"\|"project"`, `projectId?`, `cursor?`, `limit?` | `GET /context/sources`: `sources` y `nextCursor`; scope por defecto `user`, 50 fuentes por defecto, máximo 100; proyecto exige `projectId` |
 | `debatidor_export_context` | `scope`, `format: "json"\|"markdown"`, `sourceIds?`, `kinds?` | `POST /context/exports`: crea un snapshot privado y devuelve solo metadatos |
 | `debatidor_read_context_export` | `exportId`, `cursor?` | `GET /context/exports/:id`: una página completa del snapshot |
 | `debatidor_delete_context_export` | `exportId` | `DELETE /context/exports/:id`: elimina los bytes del snapshot propio, sin borrar memoria canónica |
@@ -195,6 +196,24 @@ El borrado derivado conserva mensajes y turnos originales. La finalización purg
 Las lecturas se marcan `readOnlyHint: true`. Crear snapshot se marca escritura no destructiva y no idempotente; borrar un item o export se marca destructivo e idempotente; borrar memoria de fuentes seleccionadas se marca destructivo y no idempotente. **Ninguna mutación se reintenta automáticamente.** Un error de transporte o respuesta inválida no permite inferir finalización.
 
 El MCP valida IDs, formatos, contadores, paginación y estado de borrado; admite campos extra del backend para compatibilidad, pero devuelve solo el contrato declarado. HTTP 401 indica que debe renovarse la vinculación; un 403 de OWNER no implica que la sesión haya caducado. HTTP 404 mantiene indistinguibles recursos inexistentes y ajenos; 410 informa de snapshot inválido; 413 exige reducir explícitamente la selección; 429 indica límite de exports activos. Los cuerpos internos de errores no se exponen.
+
+### Proyectos privados de contexto
+
+Estas herramientas requieren el backend P11 con `/context/projects` y soporte de `scope: { type: "project", projectId }` en exportaciones y borrado derivado. No simulan éxito si esas rutas no están desplegadas. Un proyecto es una colección privada del usuario dentro de su workspace; no es una Arena ni una sesión de agente. Puede agrupar fuentes privadas propias y compartidas ya autorizadas, pero no concede permisos sobre ellas.
+
+| Herramienta | Entrada | Operación |
+|---|---|---|
+| `debatidor_list_context_projects` | `cursor?`, `limit?` | `GET /context/projects`: página propia con `projects`, `nextCursor`; cada resumen incluye `id`, `name`, `createdAt`, `sourceCount` |
+| `debatidor_create_context_project` | `name` | `POST /context/projects`: nombre de 1–120 caracteres, sin controles; crea colección vacía, máximo 50 por usuario |
+| `debatidor_get_context_project` | `projectId` | `GET /context/projects/:id`: detalle con `sourceIds` actualmente legibles |
+| `debatidor_update_context_project_sources` | `projectId`, `sourceIds` | `PUT /context/projects/:id/sources`: reemplazo explícito de 0–100 IDs únicos; `[]` vacía la colección |
+| `debatidor_delete_context_project` | `projectId` | `DELETE /context/projects/:id`: elimina la colección e invalida sus snapshots administrados; conserva fuentes, memoria e historial |
+
+Para seleccionar un proyecto en exportaciones y borrado derivado, pasa `scope: { type: "project", projectId: "<id devuelto>" }`. Para listar sus fuentes, usa `scope: "project", projectId: "<id devuelto>"`. `projectId` es obligatorio en ese ámbito y se rechaza con `user` o `workspace`, evitando que un filtro contradictorio se ignore. El catálogo del proyecto puede devolver fuentes `PRIVATE` y `WORKSPACE`; las reglas existentes de los otros ámbitos permanecen vigentes.
+
+Un reemplazo de fuentes falla completo si alguna no está autorizada. Cambiar la selección afecta las exportaciones nuevas; un snapshot congelado conserva las fuentes admitidas mientras sigan autorizadas. Cada página revalida también la existencia y propiedad del proyecto. Eliminarlo invalida snapshots anteriores con HTTP 410 y no borra las copias ya descargadas o proyectadas a archivos locales. Borrar memoria derivada desde un proyecto mantiene los permisos de cada fuente: agrupar fuentes compartidas no permite a un miembro borrar lo reservado al OWNER.
+
+Las lecturas son de solo lectura. Crear una colección es una mutación no idempotente. Reemplazar enlaces es destructivo sobre la selección e idempotente, aunque preserva contenido; eliminar la colección es destructivo y se marca no idempotente porque repetirlo devuelve 404. Ninguna mutación se reintenta automáticamente. Los parsers rechazan una respuesta de otro proyecto, selecciones incompletas, IDs duplicados, paginación contradictoria o éxito HTTP inesperado; no devuelven campos internos adicionales del backend.
 
 ### `debatidor_quick_debate`
 
