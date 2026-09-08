@@ -61,7 +61,7 @@ export const contextStatusSchema = z.object({
     reason: z.string().min(1).optional(), modelKey: z.string().min(1).optional(), dimensions: positive.optional() }),
   queue: z.partialRecord(z.enum(['PENDING', 'RUNNING', 'DONE', 'SUPERSEDED', 'FAILED', 'DEFERRED_QUOTA', 'SKIPPED_OVER_BUDGET']), count).optional(),
   index: z.object({ items: count, chunks: count }).optional(),
-  budget: z.object({ usedTokens: count, storedChunks: count, dailyTokenLimit: positive, chunkLimit: positive }).optional(),
+  budget: z.object({ usedTokens: count, storedChunks: count, dailyTokenLimit: count, chunkLimit: count }).optional(),
   metrics: z.record(z.string(), count).optional(),
   diagnostics: z.object({ queuedQueries: count, queuedIndex: count, restartCount: count, rssBytes: count.nullable(),
     memoryLimitBytes: positive.nullable(), availableMemoryBytes: count.nullable() }).optional(),

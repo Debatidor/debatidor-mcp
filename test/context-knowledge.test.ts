@@ -145,6 +145,8 @@ test('status preserves operational knowledge counters and legacy absence without
   assert.doesNotMatch(JSON.stringify(await api.getContextStatus()), /hidden/);
   payload = { ...status, queue: { PENDING: 1, DEFERRED_QUOTA: 2, SKIPPED_OVER_BUDGET: 3 } };
   assert.deepEqual((await api.getContextStatus()).queue, { PENDING: 1, DEFERRED_QUOTA: 2, SKIPPED_OVER_BUDGET: 3 });
+  payload = { ...status, budget: { usedTokens: 0, storedChunks: 0, dailyTokenLimit: 0, chunkLimit: 0 } };
+  assert.deepEqual((await api.getContextStatus()).budget, { usedTokens: 0, storedChunks: 0, dailyTokenLimit: 0, chunkLimit: 0 });
   payload = { semantic: { state: 'disabled' } };
   assert.deepEqual(await api.getContextStatus(), payload);
   for (const bad of [null, { ...knowledge, raw: { ...knowledge.raw, declarations: -1 } }, { ...knowledge, queue: { ...knowledge.queue, pending: '1' } }]) {
