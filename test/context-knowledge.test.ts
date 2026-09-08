@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { contextDerivationSchema, contextOriginsSchema } from '../src/context-contracts.js';
+import { canonicalContextSearchSchema, contextHitSchema, contextDerivationSchema, contextOriginsSchema } from '../src/context-contracts.js';
+import { contextEntrySchema, contextItemSchema } from '../src/context-governance-contracts.js';
 import { contextStatusSchema } from '../src/context-knowledge-contracts.js';
 import { admission, apiWith, date, declaration, declarationInput, derived, event, knowledge, origin, raw, response, search, session, status, withClient } from './context-knowledge-fixture.js';
 
@@ -151,6 +152,26 @@ test('status preserves operational knowledge counters and legacy absence without
     await assert.rejects(() => api.getContextStatus(), /context_response_invalid/);
   }
   assert.equal(contextStatusSchema.safeParse({ ...status, knowledge: { ...knowledge, method: 'generative' } }).success, false);
+});
+
+test('every canonical, MCP hit and full-entry schema binds origin sources, distinct citations and derivation kind', () => {
+  const valid = (entry: Record<string, unknown>, expected: boolean) => {
+    assert.equal(contextEntrySchema.safeParse(entry).success, expected);
+    assert.equal(contextItemSchema.safeParse({ ...entry, canDelete: true }).success, expected);
+    const hit = { ...entry, score: 1, semanticSimilarity: null };
+    assert.equal(canonicalContextSearchSchema.safeParse({ ...search, hits: [hit] }).success, expected);
+    assert.equal(contextHitSchema.safeParse({ ...hit, similarity: 0, retrievalMethod: 'text' }).success, expected);
+  };
+  for (const method of ['verbatim', 'extractive', 'declared']) for (const kind of ['MESSAGE', 'SUMMARY', 'FACT', 'DECISION', 'CONCLUSION']) {
+    valid({ ...derived, kind, derivation: { method, pipelineVersion: 1 } },
+      method === 'verbatim' ? kind === 'MESSAGE' : method === 'extractive' ? kind === 'SUMMARY' : ['FACT', 'DECISION', 'CONCLUSION'].includes(kind));
+  }
+  const exact = { ...origin, sourceId: session.sourceId };
+  valid({ ...derived, provenance: { ...derived.provenance, origins: [exact, exact] } }, false);
+  valid({ ...derived, provenance: { ...derived.provenance, origins: [{ ...exact, sourceId: 'foreign' }] } }, false);
+  valid({ ...derived, provenance: { ...derived.provenance, origins: [exact, { ...exact, endUtf16: 0 }] } }, true);
+  const { derivation: _derived, ...legacy } = derived;
+  for (const kind of ['MESSAGE', 'SUMMARY', 'FACT', 'DECISION', 'CONCLUSION']) valid({ ...legacy, kind }, true);
 });
 
 test('SDK schemas reject unsafe, ambiguous or oversized inputs before backend calls and advertise all nine tools accurately', async () => {
