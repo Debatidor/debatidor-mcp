@@ -7,6 +7,7 @@ import {
   type AgentExecutionResult,
 } from './debatidor-api.js';
 import { registerAgentUploadTools } from './agent-upload-tools.js';
+import { registerAgentMediaTools } from './agent-media-tools.js';
 import {
   createDebatidorServer,
   type DebatidorServerOptions,
@@ -93,6 +94,7 @@ export function createDebatidorServerWithAssets(
   if (options.api) {
     registerAgentAssetTool(server, options.api);
     registerAgentUploadTools(server, options.api);
+    registerAgentMediaTools(server, options.api);
   }
   return server;
 }
@@ -106,7 +108,7 @@ export function registerAgentAssetTool(
     {
       title: 'Put a binary or media asset through debatidor-agent',
       description:
-        'Create or replace a binary/media file inside the connected agent project. Prefer a public HTTPS asset URL for images, audio, video, PDFs, ZIPs and other large files: the agent downloads it directly so media bytes do not transit the MCP server or model context. Small inline base64 is supported for tiny assets. The agent enforces project-root/protected-file guards and rejects unsafe/private download targets.',
+        'STEP 1 of the media hierarchy. Create or replace a binary/media file inside the connected agent project from a PUBLIC HTTPS URL: the agent downloads it directly, so media bytes never transit the MCP server or the model context. Use it whenever the provider/CDN exposes a downloadable URL for a generated image, video, audio, PDF or archive. If no public URL exists, do NOT fall back to base64: create an upload ticket with debatidor_asset_ticket (STEP 2) and send the bytes over HTTP. Inline base64 here is only for tiny assets (<= 64 KiB, e.g. icons). The agent enforces project-root/protected-file guards and rejects private/unsafe download targets.',
       inputSchema: assetInputSchema,
       outputSchema: assetResultSchema,
       annotations: {

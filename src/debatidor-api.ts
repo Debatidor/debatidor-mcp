@@ -87,7 +87,17 @@ export type QuickDebateResult = {
   connectionId: string | null;
 };
 
-export type AgentTool = 'fs.list' | 'fs.read' | 'fs.write' | 'shell.run';
+export type AgentTool =
+  | 'fs.list'
+  | 'fs.read'
+  | 'fs.get'
+  | 'fs.write'
+  | 'fs.put'
+  | 'asset.begin'
+  | 'asset.chunk'
+  | 'asset.commit'
+  | 'asset.abort'
+  | 'shell.run';
 
 export type AgentExecutionInput = {
   agentId?: string;
@@ -97,6 +107,17 @@ export type AgentExecutionInput = {
   command?: string;
   cwd?: string;
   timeoutMs?: number;
+  // fs.put / asset.*
+  url?: string;
+  base64?: string;
+  sha256?: string;
+  mimeType?: string;
+  bytes?: number;
+  uploadId?: string;
+  index?: number;
+  // fs.get
+  metadataOnly?: boolean;
+  maxBytes?: number;
 };
 
 export type AgentExecutionResult = {
@@ -110,6 +131,55 @@ export type AgentExecutionResult = {
   error?: string;
   output?: string;
   exitCode?: number | null;
+  sha256?: string;
+  mimeType?: string;
+  sourceType?: 'url' | 'base64' | 'chunked' | 'stream';
+  uploadId?: string;
+  chunkSize?: number;
+  received?: number;
+  totalReceived?: number;
+  nextIndex?: number;
+  aborted?: boolean;
+  base64?: string;
+  width?: number;
+  height?: number;
+  metadataOnly?: boolean;
+};
+
+export type RelayTicketInput = {
+  direction: 'upload' | 'download';
+  path: string;
+  agentId?: string;
+  expectedBytes?: number;
+  expectedSha256?: string;
+  mimeType?: string;
+  ttlSeconds?: number;
+};
+
+export type RelayTicket = {
+  ticketId: string;
+  direction: 'upload' | 'download';
+  status: string;
+  agentId: string | null;
+  path: string;
+  expectedBytes?: number;
+  expectedSha256?: string;
+  mimeType?: string;
+  maxBytes: number;
+  createdAt: string;
+  expiresAt: string;
+  uploadUrl?: string;
+  downloadUrl?: string;
+  methods?: string[];
+  instructions?: Record<string, string>;
+  result?: {
+    path?: string;
+    bytes?: number;
+    sha256?: string;
+    mimeType?: string;
+    sourceType?: string;
+  };
+  error?: string;
 };
 
 export type DebatidorApiAuth =
@@ -433,6 +503,23 @@ export class DebatidorApiClient {
     return this.request<AgentExecutionResult>('/agent-execution/execute', {
       method: 'POST',
       body: input,
+    });
+  }
+
+  async createAssetTicket(input: RelayTicketInput): Promise<RelayTicket> {
+    return this.request<RelayTicket>('/asset-relay/tickets', {
+      method: 'POST',
+      body: input,
+    });
+  }
+
+  async getAssetTicket(ticketId: string): Promise<RelayTicket> {
+    return this.request<RelayTicket>(`/asset-relay/tickets/${encodeURIComponent(ticketId)}`);
+  }
+
+  async cancelAssetTicket(ticketId: string): Promise<RelayTicket> {
+    return this.request<RelayTicket>(`/asset-relay/tickets/${encodeURIComponent(ticketId)}`, {
+      method: 'DELETE',
     });
   }
 

@@ -75,7 +75,7 @@ export function registerAgentUploadTools(server: McpServer, api: DebatidorApiCli
     {
       title: 'Begin an exact binary asset upload',
       description:
-        'Begin a chunked upload when the original asset exists only in the current model/browser sandbox and no usable public HTTPS URL is available. Prefer debatidor_agent_put when a provider/CDN URL exists. Returns uploadId and chunkSize. Do not resize, recompress or re-encode the original asset.',
+        'LAST RESORT (STEP 3 of the media hierarchy). Begin a base64 chunked upload ONLY when the asset exists solely in this sandbox, outbound HTTP is impossible, and the file is small (< ~1 MiB; each chunk is a 64 KiB tool call that passes through the model context). Prefer debatidor_agent_put when a public HTTPS URL exists (STEP 1) and debatidor_asset_ticket when bytes can be sent over HTTP from anywhere (STEP 2). Returns uploadId and chunkSize. Do not resize, recompress or re-encode the original asset.',
       inputSchema: beginSchema,
       outputSchema: uploadResultSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },

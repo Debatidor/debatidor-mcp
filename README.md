@@ -30,7 +30,7 @@ El endpoint remoto es el camino de producto. `stdio` se conserva para clientes l
 
 ## Estado actual
 
-Versión `0.7.8`:
+Versión `0.8.0`:
 
 - MCP TypeScript SDK v2, revisión objetivo `2026-07-28`;
 - Streamable HTTP stateless en `/mcp`;
@@ -325,6 +325,18 @@ debatidor connect --remote --shell-auto
 Sin `--shell-auto`, devuelve `denied_headless_shell_disabled`.
 
 Las tools aceptan `agentId` opcional. La evolución P9/ADR-0012 exige que targets explícitos fallen cerrado si el agent no está conectado y que reconexiones reemplacen registros stale.
+
+### Media Rail: media binaria bidireccional
+
+Jerarquía que codifican las descripciones de las tools (el modelo debe respetarla):
+
+1. **`debatidor_agent_put`** con URL HTTPS pública: el agente descarga directo. Cero bytes por el contexto del LLM.
+2. **`debatidor_asset_ticket`**: URL temporal de un solo uso (token de 192 bits, TTL 15 min por defecto) servida por `debatidor-back` en `/asset-relay`. Acepta `PUT` con el cuerpo crudo (`curl -T`, `fetch(url, {method:"PUT", body: blob})`, la extensión de Chrome, n8n) o `POST` multipart con el campo `file`. El back calcula el SHA-256 al vuelo y empalma con `asset.begin/chunk/commit` del agente con varios chunks en vuelo; si no hay `Content-Length` hace spool a disco acotado. Con `direction: "download"` ocurre lo inverso: el archivo del proyecto se transmite en streaming (`agent.file_chunk`) a quien tenga la URL.
+3. **`debatidor_asset_begin/chunk/commit/abort`**: último recurso. Base64 de 64 KiB por tool-call que pasa por el contexto; solo para archivos pequeños (< ~1 MiB) en entornos sin HTTP saliente.
+
+Lectura: **`debatidor_agent_get`** devuelve la imagen como bloque `image` (png/jpeg/gif/webp, el modelo la ve) o un `resource` embebido para pdf/audio/video/zip, con `sha256`, `mimeType` detectado por magic bytes y `width/height`. `metadataOnly=true` inspecciona sin transferir bytes; el inline está acotado (8 MiB por defecto, 32 MiB máximo) y por encima se usa un ticket de descarga. **`debatidor_asset_ticket_status`** confirma que una transferencia terminó y expone el `sha256` final.
+
+Requisitos: `debatidor-back` con `/asset-relay` y la tool `fs.get`; `debatidor-agent` >= 0.6.0 (capabilities `fs.get` y `asset.stream`).
 
 ## Clientes validados
 
