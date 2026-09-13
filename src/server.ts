@@ -15,7 +15,7 @@ import { registerContextProjectTools } from './context-project-tools.js';
 import { registerContextKnowledgeTools } from './context-knowledge-tools.js';
 import { contextSearchInputSchema } from './context-knowledge-contracts.js';
 
-export const SERVER_VERSION = '0.7.7';
+export const SERVER_VERSION = '0.7.8';
 export const PROTOCOL_VERSION = '2026-07-28';
 
 export type DebatidorServerOptions = {

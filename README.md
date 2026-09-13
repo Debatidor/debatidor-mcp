@@ -30,7 +30,7 @@ El endpoint remoto es el camino de producto. `stdio` se conserva para clientes l
 
 ## Estado actual
 
-Versión `0.7.7`:
+Versión `0.7.8`:
 
 - MCP TypeScript SDK v2, revisión objetivo `2026-07-28`;
 - Streamable HTTP stateless en `/mcp`;
