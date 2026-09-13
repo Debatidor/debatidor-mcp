@@ -8,6 +8,7 @@ import {
 } from './debatidor-api.js';
 import { registerAgentUploadTools } from './agent-upload-tools.js';
 import { registerAgentMediaTools } from './agent-media-tools.js';
+import { registerExtensionAssetTools } from './extension-asset-tools.js';
 import {
   createDebatidorServer,
   type DebatidorServerOptions,
@@ -95,6 +96,7 @@ export function createDebatidorServerWithAssets(
     registerAgentAssetTool(server, options.api);
     registerAgentUploadTools(server, options.api);
     registerAgentMediaTools(server, options.api);
+    registerExtensionAssetTools(server, options.api);
   }
   return server;
 }
