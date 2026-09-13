@@ -10,6 +10,9 @@ const UPLOAD_ID_RE = /^upl_[a-f0-9]{32}$/;
 const SHA_RE = /^[a-f0-9]{64}$/;
 const MAX_BYTES = 512 * 1024 * 1024;
 const MAX_CHUNK_BASE64 = 90_000;
+const MAX_CHUNK_HEX = 140_000;
+const MIN_CHUNK_BYTES = 4 * 1024;
+const MAX_CHUNK_BYTES = 64 * 1024;
 
 const agentIdField = z.string().trim().min(1).max(200).optional();
 const uploadIdField = z.string().trim().regex(UPLOAD_ID_RE);
@@ -19,15 +22,40 @@ const beginSchema = z.object({
   bytes: z.number().int().positive().max(MAX_BYTES).describe('Exact original file size in bytes.'),
   sha256: z.string().trim().toLowerCase().regex(SHA_RE).optional().describe('Expected SHA-256 of the complete original file.'),
   mimeType: z.string().trim().min(3).max(200).optional().describe('Optional MIME type, for example image/png or video/mp4.'),
+  chunkSize: z
+    .number()
+    .int()
+    .min(MIN_CHUNK_BYTES)
+    .max(MAX_CHUNK_BYTES)
+    .optional()
+    .describe(
+      'Transport chunk size in bytes (4096-65536, default 16384). Pick a smaller value when the host I/O channel limits message size so each chunk fits comfortably in one tool call. The agent echoes back the chunkSize you must actually use for every chunk except the last.',
+    ),
   agentId: agentIdField,
 });
 
 const chunkSchema = z.object({
   uploadId: uploadIdField,
   index: z.number().int().nonnegative().max(1_000_000),
-  base64: z.string().min(1).max(MAX_CHUNK_BASE64).describe('Base64 bytes for exactly this chunk. Use the chunkSize returned by begin.'),
+  encoding: z
+    .enum(['base64', 'hex'])
+    .default('base64')
+    .describe('Byte encoding for this chunk. base64 (default) is most compact; hex is available for channels that mangle base64 characters.'),
+  base64: z
+    .string()
+    .max(MAX_CHUNK_BASE64)
+    .optional()
+    .describe('base64 bytes for exactly this chunk when encoding=base64. At most chunkSize decoded bytes.'),
+  hex: z
+    .string()
+    .max(MAX_CHUNK_HEX)
+    .optional()
+    .describe('Hex bytes for exactly this chunk when encoding=hex. At most chunkSize decoded bytes.'),
   agentId: agentIdField,
-});
+}).refine(
+  (value) => (value.encoding === 'hex' ? Boolean(value.hex) : Boolean(value.base64)),
+  { message: 'Provide base64 for encoding=base64, or hex for encoding=hex.', path: ['base64'] },
+);
 
 const uploadRefSchema = z.object({
   uploadId: uploadIdField,
@@ -75,7 +103,7 @@ export function registerAgentUploadTools(server: McpServer, api: DebatidorApiCli
     {
       title: 'Begin an exact binary asset upload',
       description:
-        'LAST RESORT (STEP 3 of the media hierarchy). Begin a base64 chunked upload ONLY when the asset exists solely in this sandbox, outbound HTTP is impossible, and the file is small (< ~1 MiB; each chunk is a 64 KiB tool call that passes through the model context). Prefer debatidor_agent_put when a public HTTPS URL exists (STEP 1) and debatidor_asset_ticket when bytes can be sent over HTTP from anywhere (STEP 2). Returns uploadId and chunkSize. Do not resize, recompress or re-encode the original asset.',
+        'LAST RESORT (STEP 3 of the media hierarchy). Begin a chunked upload ONLY when the asset exists solely in this sandbox and outbound HTTP is unavailable (e.g. a network-isolated code interpreter). Prefer debatidor_agent_put when a public HTTPS URL exists (STEP 1) and debatidor_asset_ticket when bytes can be sent over HTTP from anywhere (STEP 2). This path moves the file as a sequence of tool calls, so it is slow for large files; use the smallest chunkSize that your host I/O channel accepts (default 16 KiB). Returns uploadId and the chunkSize to use. Do not resize, recompress or re-encode the original asset. See the README "Air-gapped chunked upload" section for a ready-to-run buffered-read script.',
       inputSchema: beginSchema,
       outputSchema: uploadResultSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
@@ -88,7 +116,7 @@ export function registerAgentUploadTools(server: McpServer, api: DebatidorApiCli
     {
       title: 'Upload one binary asset chunk',
       description:
-        'Send the next chunk of an upload as base64. Chunks must be sent in increasing index order and must not exceed the chunkSize returned by debatidor_asset_begin.',
+        'Send the next chunk of an upload in increasing index order. Each chunk carries at most the chunkSize (decoded bytes) returned by debatidor_asset_begin, encoded as base64 (default) or hex. Read the source file with a fixed buffer size equal to chunkSize and send one chunk per read; do not hand-assemble payloads.',
       inputSchema: chunkSchema,
       outputSchema: uploadResultSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
@@ -162,7 +190,9 @@ async function executeUpload(
 
 function formatResult(tool: string, result: ApiResult): string {
   if (result.ok === false) return `${tool} failed: ${result.error ?? 'operation_failed'}`;
-  if (tool === 'asset.begin') return `Upload ${result.uploadId} ready; chunkSize=${result.chunkSize ?? 0}.`;
+  if (tool === 'asset.begin') {
+    return `Upload ${result.uploadId} ready; send each chunk as exactly ${result.chunkSize ?? 0} bytes (base64 or hex) in order, then commit.`;
+  }
   if (tool === 'asset.chunk') return `Upload ${result.uploadId}: received ${result.received ?? 0} bytes; nextIndex=${result.nextIndex ?? 0}.`;
   if (tool === 'asset.commit') return `Stored ${result.path ?? 'asset'} (${result.bytes ?? 0} bytes)${result.sha256 ? ` · sha256 ${result.sha256}` : ''}.`;
   return `Upload ${result.uploadId ?? ''} aborted.`;

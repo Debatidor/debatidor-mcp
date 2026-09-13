@@ -115,6 +115,10 @@ export type AgentExecutionInput = {
   bytes?: number;
   uploadId?: string;
   index?: number;
+  // asset.begin transport tuning + asset.chunk encoding
+  chunkSize?: number;
+  encoding?: 'base64' | 'hex';
+  hex?: string;
   // fs.get
   metadataOnly?: boolean;
   maxBytes?: number;

@@ -332,11 +332,57 @@ Jerarquía que codifican las descripciones de las tools (el modelo debe respetar
 
 1. **`debatidor_agent_put`** con URL HTTPS pública: el agente descarga directo. Cero bytes por el contexto del LLM.
 2. **`debatidor_asset_ticket`**: URL temporal de un solo uso (token de 192 bits, TTL 15 min por defecto) servida por `debatidor-back` en `/asset-relay`. Acepta `PUT` con el cuerpo crudo (`curl -T`, `fetch(url, {method:"PUT", body: blob})`, la extensión de Chrome, n8n) o `POST` multipart con el campo `file`. El back calcula el SHA-256 al vuelo y empalma con `asset.begin/chunk/commit` del agente con varios chunks en vuelo; si no hay `Content-Length` hace spool a disco acotado. Con `direction: "download"` ocurre lo inverso: el archivo del proyecto se transmite en streaming (`agent.file_chunk`) a quien tenga la URL.
-3. **`debatidor_asset_begin/chunk/commit/abort`**: último recurso. Base64 de 64 KiB por tool-call que pasa por el contexto; solo para archivos pequeños (< ~1 MiB) en entornos sin HTTP saliente.
+3. **`debatidor_asset_begin/chunk/commit/abort`**: último recurso para entornos **sin egress de red** (p. ej. un intérprete de código aislado a nivel DNS, donde `debatidor_asset_ticket` no es alcanzable). Mueve el archivo como una secuencia de tool-calls, así que es lento; se reserva para cuando 1) y 2) no son posibles. El tamaño de chunk es configurable en `begin` (`chunkSize`, 4096–65536 bytes, default 16384): elige el más pequeño que tolere el canal de I/O del host para que cada fragmento entre holgado en un turno. Cada chunk viaja en `base64` (default) o `hex`; ambas son codificaciones estándar de bytes y `hex` existe para canales que maltratan ciertos caracteres de base64. Ver la sección "Subida por chunks en entornos air-gapped" para un script listo para usar.
 
 Lectura: **`debatidor_agent_get`** devuelve la imagen como bloque `image` (png/jpeg/gif/webp, el modelo la ve) o un `resource` embebido para pdf/audio/video/zip, con `sha256`, `mimeType` detectado por magic bytes y `width/height`. `metadataOnly=true` inspecciona sin transferir bytes; el inline está acotado (8 MiB por defecto, 32 MiB máximo) y por encima se usa un ticket de descarga. **`debatidor_asset_ticket_status`** confirma que una transferencia terminó y expone el `sha256` final.
 
 Requisitos: `debatidor-back` con `/asset-relay` y la tool `fs.get`; `debatidor-agent` >= 0.6.0 (capabilities `fs.get` y `asset.stream`).
+
+### Subida por chunks en entornos air-gapped
+
+Algunos hosts ejecutan el código del cliente en un sandbox **sin salida de red**: `requests.put()` hacia el Asset Relay falla con `Could not resolve host`. En ese caso el único canal de salida son las tool-calls del MCP, que tienen un límite de tamaño de mensaje por turno. El flujo es `debatidor_asset_begin` → N × `debatidor_asset_chunk` en orden → `debatidor_asset_commit`, leyendo el archivo con un buffer del tamaño que devuelve `begin`.
+
+Script de referencia (lectura por buffers, sin transformar los bytes). El host lo ejecuta en su propio entorno; cada `emit(...)` representa una llamada a la tool correspondiente:
+
+```python
+import base64, hashlib
+
+def upload_local_file(path, dest, emit_begin, emit_chunk, emit_commit, chunk_size=16384):
+    """Sube un archivo local por el canal de tool-calls cuando no hay red.
+    emit_begin/emit_chunk/emit_commit invocan debatidor_asset_begin/chunk/commit
+    y devuelven su structuredContent."""
+    size = 0
+    sha = hashlib.sha256()
+    with open(path, "rb") as fh:
+        data = fh.read()
+    size = len(data)
+    sha.update(data)
+
+    begin = emit_begin({
+        "path": dest,
+        "bytes": size,
+        "sha256": sha.hexdigest(),
+        "chunkSize": chunk_size,
+    })
+    # El agente puede recortar chunkSize a su rango: usa el que devuelve.
+    step = begin["chunkSize"]
+    upload_id = begin["uploadId"]
+
+    index = 0
+    for offset in range(0, size, step):
+        block = data[offset:offset + step]
+        emit_chunk({
+            "uploadId": upload_id,
+            "index": index,
+            "encoding": "base64",
+            "base64": base64.b64encode(block).decode("ascii"),
+        })
+        index += 1
+
+    return emit_commit({"uploadId": upload_id})
+```
+
+Para leer archivos muy grandes sin cargarlos enteros en memoria, sustituye la lectura completa por `fh.read(step)` en un bucle, actualizando `sha` e `index` en cada iteración. Si el canal rechaza caracteres de base64, cambia `encoding` a `"hex"` y envía `"hex": block.hex()`. El `commit` devuelve el `sha256` que calculó el agente: compáralo con el local para confirmar integridad de extremo a extremo.
 
 ## Clientes validados
 
