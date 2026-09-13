@@ -9,6 +9,7 @@ import { createDebatidorServerWithAssets } from '../src/agent-asset-tools.js';
 const PNG_1X1_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 const SHA = 'd'.repeat(64);
+const TOKEN = 'art_' + 'a'.repeat(48);
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -101,6 +102,7 @@ test('debatidor_asset_ticket forwards the request and returns the single-use URL
         {
           ticketId: 'tkt_0123456789abcdef01234567',
           direction: body?.direction,
+          uploader: 'any',
           status: 'pending',
           agentId: body?.agentId ?? null,
           path: body?.path,
@@ -109,7 +111,7 @@ test('debatidor_asset_ticket forwards the request and returns the single-use URL
           maxBytes: 268435456,
           createdAt: '2026-09-13T00:00:00.000Z',
           expiresAt: '2026-09-13T00:15:00.000Z',
-          uploadUrl: 'https://api.test/asset-relay/upload/art_' + 'a'.repeat(48),
+          uploadUrl: 'https://api.test/asset-relay/upload/' + TOKEN,
           methods: ['PUT', 'POST'],
           instructions: { rawPut: 'curl ...' },
         },
@@ -120,6 +122,7 @@ test('debatidor_asset_ticket forwards the request and returns the single-use URL
       return json({
         ticketId: 'tkt_0123456789abcdef01234567',
         direction: 'upload',
+        uploader: 'any',
         status: 'completed',
         agentId: 'vps',
         path: 'media/render.png',
@@ -140,15 +143,20 @@ test('debatidor_asset_ticket forwards the request and returns the single-use URL
     });
     const structured = created.structuredContent as Record<string, unknown>;
     assert.equal(structured.direction, 'upload');
+    assert.equal(structured.uploader, 'any');
     assert.equal(structured.status, 'pending');
-    assert.equal(structured.url, 'https://api.test/asset-relay/upload/art_' + 'a'.repeat(48));
+    assert.equal(structured.url, 'https://api.test/asset-relay/upload/' + TOKEN);
     assert.deepEqual(structured.methods, ['PUT', 'POST']);
+    assert.equal(structured.fileName, 'render.png');
     const text = String((created.content as Array<{ text?: string }>)[0]?.text);
     assert.match(text, /art_a{48}/);
     assert.match(text, /debatidor_asset_ticket_status/);
     assert.equal(calls[0]?.method, 'POST');
     assert.equal(calls[0]?.body?.direction, 'upload');
     assert.equal(calls[0]?.body?.expectedSha256, SHA);
+    // uploader='any' no viaja al backend (default del servidor) ni arrastra routing ids.
+    assert.equal('uploader' in (calls[0]?.body ?? {}), false);
+    assert.equal('connectionId' in (calls[0]?.body ?? {}), false);
 
     const status = await client.callTool({ name: 'debatidor_asset_ticket_status', arguments: { ticketId: 'tkt_0123456789abcdef01234567' } });
     const statusStructured = status.structuredContent as Record<string, unknown>;
@@ -163,13 +171,139 @@ test('debatidor_asset_ticket forwards the request and returns the single-use URL
   });
 });
 
-test('media tool descriptions encode the URL -> ticket -> chunk hierarchy', async () => {
+test("uploader='extension' never returns the URL, surfaces the dispatch result and long-polls status (ADR-0013)", async () => {
+  const calls: Array<{ url: string; method: string; body?: Record<string, unknown> }> = [];
+  let delivered = true;
+  const upstream: typeof fetch = async (input, init) => {
+    const url = String(input);
+    const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
+    calls.push({ url, method: init?.method ?? 'GET', body });
+    if (url.endsWith('/asset-relay/tickets') && init?.method === 'POST') {
+      return json(
+        {
+          ticketId: 'tkt_0123456789abcdef01234567',
+          direction: 'upload',
+          uploader: body?.uploader,
+          status: 'pending',
+          agentId: body?.agentId ?? null,
+          path: body?.path,
+          expectedBytes: body?.expectedBytes,
+          expectedSha256: body?.expectedSha256,
+          mimeType: body?.mimeType,
+          maxBytes: 268435456,
+          createdAt: '2026-09-13T00:00:00.000Z',
+          expiresAt: '2026-09-13T00:15:00.000Z',
+          connectionId: body?.connectionId,
+          debateId: body?.debateId,
+          dispatch: delivered
+            ? { delivered: true, at: '2026-09-13T00:00:01.000Z' }
+            : { delivered: false, reason: 'no_extension_connected', at: '2026-09-13T00:00:01.000Z' },
+          // Un backend mal configurado que devolviera la URL tampoco debe filtrarla al chat.
+          uploadUrl: 'https://api.test/asset-relay/upload/' + TOKEN,
+          methods: ['PUT', 'POST'],
+          instructions: { rawPut: 'curl ' + TOKEN },
+        },
+        201,
+      );
+    }
+    if (url.includes('/asset-relay/tickets/tkt_0123456789abcdef01234567')) {
+      return json({
+        ticketId: 'tkt_0123456789abcdef01234567',
+        direction: 'upload',
+        uploader: 'extension',
+        status: 'completed',
+        agentId: 'vps',
+        path: 'media/render.png',
+        maxBytes: 268435456,
+        createdAt: '2026-09-13T00:00:00.000Z',
+        expiresAt: '2026-09-13T00:15:00.000Z',
+        dispatch: { delivered: true, at: '2026-09-13T00:00:01.000Z' },
+        result: { path: 'media/render.png', bytes: 4096, sha256: SHA, mimeType: 'image/png', sourceType: 'chunked' },
+      });
+    }
+    return json({ message: 'asset_relay_ticket_not_found' }, 404);
+  };
+  const api = new DebatidorApiClient('https://api.test', { type: 'api-key', token: 'test' }, upstream);
+
+  await withClient(api, async (client) => {
+    const created = await client.callTool({
+      name: 'debatidor_asset_ticket',
+      arguments: {
+        agentId: 'vps',
+        path: 'media/render.png',
+        uploader: 'extension',
+        connectionId: 'conn_dom_claude',
+        debateId: 'dbt_1',
+        expectedBytes: 4096,
+        expectedSha256: SHA,
+        mimeType: 'image/png',
+      },
+    });
+    assert.notEqual(created.isError, true);
+    const structured = created.structuredContent as Record<string, unknown>;
+    assert.equal(structured.uploader, 'extension');
+    assert.equal(structured.fileName, 'render.png');
+    assert.equal(structured.connectionId, 'conn_dom_claude');
+    assert.deepEqual(structured.dispatch, { delivered: true, at: '2026-09-13T00:00:01.000Z' });
+    assert.equal('url' in structured, false);
+    assert.equal('instructions' in structured, false);
+    assert.equal('methods' in structured, false);
+    // Ni el texto ni el JSON completo del resultado contienen el token.
+    assert.equal(JSON.stringify(created).includes(TOKEN), false);
+    const text = String((created.content as Array<{ text?: string }>)[0]?.text);
+    assert.match(text, /via browser extension/);
+    assert.match(text, /"render\.png"/);
+    assert.match(text, /waitSeconds 60/);
+    assert.equal(calls[0]?.body?.uploader, 'extension');
+    assert.equal(calls[0]?.body?.connectionId, 'conn_dom_claude');
+    assert.equal(calls[0]?.body?.debateId, 'dbt_1');
+    assert.equal(calls[0]?.body?.expectedBytes, 4096);
+
+    const status = await client.callTool({
+      name: 'debatidor_asset_ticket_status',
+      arguments: { ticketId: 'tkt_0123456789abcdef01234567', waitSeconds: 60 },
+    });
+    const statusStructured = status.structuredContent as Record<string, unknown>;
+    assert.equal(statusStructured.status, 'completed');
+    assert.equal(statusStructured.uploader, 'extension');
+    assert.equal((statusStructured.result as Record<string, unknown>).bytes, 4096);
+    assert.ok(calls[1]?.url.endsWith('/asset-relay/tickets/tkt_0123456789abcdef01234567?wait=60'), calls[1]?.url);
+
+    // Sin waitSeconds no se añade query.
+    await client.callTool({ name: 'debatidor_asset_ticket_status', arguments: { ticketId: 'tkt_0123456789abcdef01234567' } });
+    assert.ok(calls[2]?.url.endsWith('/asset-relay/tickets/tkt_0123456789abcdef01234567'), calls[2]?.url);
+
+    // Sin extensión conectada: mensaje accionable, sin URL y sin recomendar chunked para archivos grandes.
+    delivered = false;
+    const undelivered = await client.callTool({
+      name: 'debatidor_asset_ticket',
+      arguments: { path: 'media/render.png', uploader: 'extension' },
+    });
+    const undeliveredText = String((undelivered.content as Array<{ text?: string }>)[0]?.text);
+    assert.match(undeliveredText, /NOT delivered \(no_extension_connected\)/);
+    assert.equal(JSON.stringify(undelivered).includes(TOKEN), false);
+    assert.equal((undelivered.structuredContent as Record<string, unknown>).status, 'pending');
+
+    // extension + download es un error de uso, sin llamar al backend.
+    const before = calls.length;
+    const wrong = await client.callTool({
+      name: 'debatidor_asset_ticket',
+      arguments: { path: 'media/render.png', direction: 'download', uploader: 'extension' },
+    });
+    assert.equal(wrong.isError, true);
+    assert.equal(calls.length, before);
+  });
+});
+
+test('media tool descriptions encode the URL -> ticket -> extension -> chunk hierarchy', async () => {
   const api = new DebatidorApiClient('https://api.test', { type: 'api-key', token: 'test' }, async () => json({}));
   await withClient(api, async (client) => {
     const { tools } = await client.listTools();
     const byName = new Map(tools.map((tool) => [tool.name, tool.description ?? '']));
     assert.match(byName.get('debatidor_agent_put') ?? '', /STEP 1/);
     assert.match(byName.get('debatidor_asset_ticket') ?? '', /1\) public HTTPS URL exists -> debatidor_agent_put/);
+    assert.match(byName.get('debatidor_asset_ticket') ?? '', /uploader='extension'/);
+    assert.match(byName.get('debatidor_asset_ticket_status') ?? '', /waitSeconds/);
     assert.match(byName.get('debatidor_asset_begin') ?? '', /LAST RESORT/);
   });
 });

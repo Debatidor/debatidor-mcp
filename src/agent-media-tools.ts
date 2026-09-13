@@ -16,8 +16,13 @@ import {
  *   2. debatidor_asset_ticket (upload): URL temporal de un solo uso; los bytes
  *      viajan por HTTP crudo/multipart desde el sandbox, el navegador, curl o
  *      la extension, nunca por tool-calls.
+ *      2b. uploader='extension' (ADR-0013): en hosts web sin HTTP saliente
+ *      (p. ej. el sandbox de claude.ai) la extension de Debatidor sube el
+ *      archivo publicado en el chat. La URL del ticket NO vuelve al modelo:
+ *      viaja por el WebSocket de la extension.
  *   3. debatidor_asset_begin/chunk/commit: base64 por chunks, SOLO si el
- *      entorno no puede hacer HTTP saliente y el archivo es pequeno (< ~1 MiB).
+ *      entorno no puede hacer HTTP saliente, no hay extension conectada y el
+ *      archivo es pequeno (< ~1 MiB).
  *
  * Para LEER media del proyecto:
  *   - debatidor_agent_get devuelve la imagen como bloque `image` (el modelo la
@@ -30,6 +35,7 @@ const SHA_RE = /^[a-f0-9]{64}$/;
 const TICKET_RE = /^tkt_[a-f0-9]{24}$/;
 const MAX_INLINE_BYTES = 32 * 1024 * 1024;
 const MAX_TICKET_BYTES = 512 * 1024 * 1024;
+const MAX_WAIT_SECONDS = 60;
 const VIEWABLE_IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
 const agentIdField = z
@@ -46,6 +52,8 @@ const pathField = z
   .min(1)
   .max(1000)
   .describe('Relative path inside the connected agent project root.');
+
+const routingIdField = z.string().trim().min(1).max(200).optional();
 
 const getInputSchema = z.object({
   path: pathField,
@@ -84,6 +92,16 @@ const ticketInputSchema = z.object({
     .default('upload')
     .describe('upload: someone will PUT/POST bytes into the project path. download: someone will GET the project file.'),
   path: pathField,
+  uploader: z
+    .enum(['any', 'extension'])
+    .default('any')
+    .describe(
+      "Upload only. 'any' (default): the single-use URL is returned so you can hand it to curl, a sandbox with outbound HTTP, or the user. 'extension': the Debatidor browser extension picks the file you published in this chat (matched by file name inside the latest assistant turn) and uploads it; the URL is delivered to the extension over its own socket and is NOT returned here, so the secret never enters the conversation. Use 'extension' whenever the host is a web chat whose sandbox cannot reach the relay (e.g. claude.ai code execution).",
+    ),
+  connectionId: routingIdField.describe(
+    "Extension uploads only. Host connection that should act on the ticket (e.g. conn_dom_claude, conn_dom_openai). Omit to let any linked tab of this account act.",
+  ),
+  debateId: routingIdField.describe('Optional Debatidor arena id to route the ticket only to extension sockets bound to that arena.'),
   expectedBytes: z
     .number()
     .int()
@@ -115,12 +133,20 @@ const ticketInputSchema = z.object({
   agentId: agentIdField,
 });
 
+const dispatchSchema = z.object({
+  delivered: z.boolean(),
+  reason: z.string().optional(),
+  at: z.string().optional(),
+});
+
 const ticketResultSchema = z.object({
   ticketId: z.string(),
   direction: z.enum(['upload', 'download']),
+  uploader: z.enum(['any', 'extension']).optional(),
   status: z.string(),
   agentId: z.string().nullable(),
   path: z.string(),
+  fileName: z.string().optional(),
   url: z.string().optional(),
   methods: z.array(z.string()).optional(),
   expiresAt: z.string(),
@@ -128,6 +154,9 @@ const ticketResultSchema = z.object({
   expectedBytes: z.number().int().nonnegative().optional(),
   expectedSha256: z.string().optional(),
   mimeType: z.string().optional(),
+  connectionId: z.string().optional(),
+  debateId: z.string().optional(),
+  dispatch: dispatchSchema.optional(),
   instructions: z.record(z.string(), z.string()).optional(),
   result: z
     .object({
@@ -143,6 +172,15 @@ const ticketResultSchema = z.object({
 
 const ticketStatusInputSchema = z.object({
   ticketId: z.string().trim().regex(TICKET_RE).describe('Ticket id returned by debatidor_asset_ticket (tkt_...).'),
+  waitSeconds: z
+    .number()
+    .int()
+    .min(0)
+    .max(MAX_WAIT_SECONDS)
+    .optional()
+    .describe(
+      'Long-poll: block up to this many seconds (max 60) until the ticket settles (completed/failed/expired/cancelled). Use it right after an extension upload instead of polling repeatedly. 0 or omitted returns immediately.',
+    ),
 });
 
 type GetInput = z.infer<typeof getInputSchema>;
@@ -183,9 +221,9 @@ export function registerAgentMediaTools(server: McpServer, api: DebatidorApiClie
   server.registerTool(
     'debatidor_asset_ticket',
     {
-      title: 'Create a single-use asset relay URL (upload or download)',
+      title: 'Create a single-use asset relay ticket (upload or download)',
       description:
-        'Create a short-lived, single-use HTTPS URL that moves a binary between the outside world and the connected agent project WITHOUT passing bytes through this conversation. PREFERRED path for any media that has no public URL: generated images or videos in a sandbox, files the user has on their machine, browser blobs. Upload tickets accept a raw PUT body (curl -T, fetch with a Blob, the Debatidor browser extension) or a multipart POST with field `file`; the relay computes SHA-256 in flight and streams into the agent, so files up to hundreds of MB are fine. Download tickets stream a project file to whoever holds the URL. Decision order when storing media: 1) public HTTPS URL exists -> debatidor_agent_put; 2) otherwise -> this tool, then hand the URL to the user or fetch it from the sandbox; 3) only if outbound HTTP is impossible and the file is small (< ~1 MiB) -> debatidor_asset_begin/chunk/commit. The URL contains the secret: share it only with the intended uploader. Check completion with debatidor_asset_ticket_status.',
+        'Create a short-lived, single-use relay ticket that moves a binary between the outside world and the connected agent project WITHOUT passing bytes through this conversation. PREFERRED path for any media that has no public URL: generated images or videos in a sandbox, files the user has on their machine, browser blobs. Upload tickets accept a raw PUT body (curl -T, fetch with a Blob, the Debatidor browser extension) or a multipart POST with field `file`; the relay computes SHA-256 in flight and streams into the agent, so files up to hundreds of MB are fine. Download tickets stream a project file to whoever holds the URL. Decision order when storing media: 1) public HTTPS URL exists -> debatidor_agent_put; 2) otherwise -> this tool: with uploader=\'extension\' when you are in a web chat whose sandbox has no outbound HTTP (publish the file in the chat first, then create the ticket with the same file name, expectedBytes and expectedSha256; the extension uploads it and you confirm with debatidor_asset_ticket_status waitSeconds=60), or with uploader=\'any\' to get the URL and fetch it from the sandbox or hand it to the user; 3) only if outbound HTTP is impossible, no extension is connected and the file is small (< ~1 MiB) -> debatidor_asset_begin/chunk/commit. With uploader=\'any\' the URL contains the secret: share it only with the intended uploader. With uploader=\'extension\' no URL is returned by design.',
       inputSchema: ticketInputSchema,
       outputSchema: ticketResultSchema,
       annotations: {
@@ -197,16 +235,27 @@ export function registerAgentMediaTools(server: McpServer, api: DebatidorApiClie
     },
     async (input: TicketInput) => {
       try {
+        const direction = input.direction ?? 'upload';
+        const uploader = input.uploader ?? 'any';
+        if (uploader === 'extension' && direction !== 'upload') {
+          return {
+            content: [{ type: 'text' as const, text: "uploader='extension' only applies to upload tickets." }],
+            isError: true,
+          };
+        }
         const ticket = await api.createAssetTicket({
-          direction: input.direction ?? 'upload',
+          direction,
           path: input.path,
           agentId: input.agentId,
           expectedBytes: input.expectedBytes,
           expectedSha256: input.expectedSha256,
           mimeType: input.mimeType,
           ttlSeconds: input.ttlSeconds,
+          uploader: uploader === 'extension' ? 'extension' : undefined,
+          connectionId: uploader === 'extension' ? input.connectionId : undefined,
+          debateId: uploader === 'extension' ? input.debateId : undefined,
         });
-        const safe = compactTicket(ticket);
+        const safe = compactTicket(ticket, uploader);
         return {
           content: [{ type: 'text' as const, text: formatTicketCreated(safe) }],
           structuredContent: safe,
@@ -220,9 +269,9 @@ export function registerAgentMediaTools(server: McpServer, api: DebatidorApiClie
   server.registerTool(
     'debatidor_asset_ticket_status',
     {
-      title: 'Check an asset relay ticket',
+      title: 'Check an asset relay ticket (optionally long-poll)',
       description:
-        'Read the state of a relay ticket created with debatidor_asset_ticket: pending (nobody used the URL yet), active (transfer in progress), completed (with final path, bytes and sha256 written or served by the agent), failed, expired or cancelled. Poll this after handing an upload URL to the user to confirm the file landed in the project.',
+        'Read the state of a relay ticket created with debatidor_asset_ticket: pending (nobody used the URL yet), active (transfer in progress), completed (with final path, bytes and sha256 written or served by the agent), failed, expired or cancelled. Pass waitSeconds (up to 60) to block until the ticket settles instead of polling: one call is usually enough after an extension upload. Poll again only while the status is still pending/active.',
       inputSchema: ticketStatusInputSchema,
       outputSchema: ticketResultSchema,
       annotations: {
@@ -232,10 +281,10 @@ export function registerAgentMediaTools(server: McpServer, api: DebatidorApiClie
         openWorldHint: false,
       },
     },
-    async ({ ticketId }) => {
+    async ({ ticketId, waitSeconds }) => {
       try {
-        const ticket = await api.getAssetTicket(ticketId);
-        const safe = compactTicket(ticket);
+        const ticket = await api.getAssetTicket(ticketId, waitSeconds);
+        const safe = compactTicket(ticket, ticket.uploader ?? 'any');
         return {
           content: [{ type: 'text' as const, text: formatTicketStatus(safe) }],
           structuredContent: safe,
@@ -319,21 +368,32 @@ function formatGetResult(raw: AgentExecutionResult, input: GetInput) {
 
 type CompactTicket = z.infer<typeof ticketResultSchema>;
 
-function compactTicket(ticket: RelayTicket): CompactTicket {
+/**
+ * Proyeccion segura del ticket para el modelo. Con uploader='extension' se
+ * omiten url/instructions aunque el backend las devolviera (defensa en
+ * profundidad, ADR-0013 §2): el token no debe tocar la transcripcion.
+ */
+function compactTicket(ticket: RelayTicket, uploader: 'any' | 'extension'): CompactTicket {
+  const viaExtension = uploader === 'extension' || ticket.uploader === 'extension';
   return {
     ticketId: ticket.ticketId,
     direction: ticket.direction,
+    uploader: viaExtension ? 'extension' : 'any',
     status: ticket.status,
     agentId: ticket.agentId ?? null,
     path: ticket.path,
-    url: ticket.uploadUrl ?? ticket.downloadUrl,
-    methods: ticket.methods,
+    fileName: basename(ticket.path),
+    url: viaExtension ? undefined : ticket.uploadUrl ?? ticket.downloadUrl,
+    methods: viaExtension ? undefined : ticket.methods,
     expiresAt: ticket.expiresAt,
     maxBytes: ticket.maxBytes,
     expectedBytes: ticket.expectedBytes,
     expectedSha256: ticket.expectedSha256,
     mimeType: ticket.mimeType,
-    instructions: ticket.instructions,
+    connectionId: ticket.connectionId,
+    debateId: ticket.debateId,
+    dispatch: ticket.dispatch,
+    instructions: viaExtension ? undefined : ticket.instructions,
     result: ticket.result,
     error: ticket.error,
   };
@@ -341,8 +401,22 @@ function compactTicket(ticket: RelayTicket): CompactTicket {
 
 function formatTicketCreated(ticket: CompactTicket): string {
   const lines = [
-    `Relay ticket ${ticket.ticketId} (${ticket.direction}) for ${ticket.path}, valid until ${ticket.expiresAt}, max ${ticket.maxBytes} bytes.`,
+    `Relay ticket ${ticket.ticketId} (${ticket.direction}${ticket.uploader === 'extension' ? ' via browser extension' : ''}) for ${ticket.path}, valid until ${ticket.expiresAt}, max ${ticket.maxBytes} bytes.`,
   ];
+  if (ticket.uploader === 'extension') {
+    if (ticket.dispatch?.delivered) {
+      lines.push(
+        `Handed to the Debatidor extension${ticket.connectionId ? ` (${ticket.connectionId})` : ''}: it will look for a file named "${ticket.fileName ?? basename(ticket.path)}" in the latest assistant turn of the linked chat and upload it. No URL is returned by design.`,
+      );
+      lines.push(`Call debatidor_asset_ticket_status with ticketId ${ticket.ticketId} and waitSeconds 60 to confirm completion and the final sha256.`);
+    } else {
+      const reason = ticket.dispatch?.reason ?? 'not_dispatched';
+      lines.push(
+        `NOT delivered (${reason}): no Debatidor extension is connected for this account. Ask the user to open the extension on the linked chat tab and enable it, then create the ticket again. The ticket stays pending until ${ticket.expiresAt}; do not fall back to chunked upload for files above ~1 MiB.`,
+      );
+    }
+    return lines.join('\n');
+  }
   if (ticket.url) lines.push(`URL (single-use, keep it private): ${ticket.url}`);
   if (ticket.direction === 'upload') {
     lines.push(
@@ -351,7 +425,7 @@ function formatTicketCreated(ticket: CompactTicket): string {
   } else {
     lines.push('Anyone holding the URL can GET the file once; the response streams straight from the agent.');
   }
-  lines.push(`Then call debatidor_asset_ticket_status with ticketId ${ticket.ticketId} to confirm completion and the final sha256.`);
+  lines.push(`Then call debatidor_asset_ticket_status with ticketId ${ticket.ticketId} (waitSeconds up to 60) to confirm completion and the final sha256.`);
   return lines.join('\n');
 }
 
@@ -361,8 +435,20 @@ function formatTicketStatus(ticket: CompactTicket): string {
     return `${base} ${ticket.result.bytes ?? 0} bytes${ticket.result.sha256 ? ` · sha256 ${ticket.result.sha256}` : ''}${ticket.result.mimeType ? ` · ${ticket.result.mimeType}` : ''}.`;
   }
   if (ticket.status === 'failed' && ticket.error) return `${base} Error: ${ticket.error}.`;
-  if (ticket.status === 'pending') return `${base} Nobody has used the URL yet; it expires at ${ticket.expiresAt}.`;
+  if (ticket.status === 'pending') {
+    const hint =
+      ticket.uploader === 'extension' && ticket.dispatch && !ticket.dispatch.delivered
+        ? ` It was never delivered to an extension (${ticket.dispatch.reason ?? 'not_dispatched'}).`
+        : ' Nobody has used the URL yet;';
+    return `${base}${hint} it expires at ${ticket.expiresAt}.`;
+  }
+  if (ticket.status === 'active') return `${base} Transfer in progress; call again with waitSeconds to wait for completion.`;
   return base;
+}
+
+function basename(value: string): string {
+  const normalized = String(value ?? '').replace(/\\/g, '/');
+  return normalized.slice(normalized.lastIndexOf('/') + 1) || 'asset.bin';
 }
 
 function safeMediaError(error: unknown, kind: 'read' | 'ticket') {

@@ -150,6 +150,8 @@ export type AgentExecutionResult = {
   metadataOnly?: boolean;
 };
 
+export type RelayUploader = 'any' | 'extension';
+
 export type RelayTicketInput = {
   direction: 'upload' | 'download';
   path: string;
@@ -158,6 +160,16 @@ export type RelayTicketInput = {
   expectedSha256?: string;
   mimeType?: string;
   ttlSeconds?: number;
+  /** ADR-0013: 'extension' → la URL viaja por el WS de la extensión, no por HTTP ni por el chat. */
+  uploader?: RelayUploader;
+  connectionId?: string;
+  debateId?: string;
+};
+
+export type RelayDispatch = {
+  delivered: boolean;
+  reason?: string;
+  at?: string;
 };
 
 export type RelayTicket = {
@@ -172,6 +184,10 @@ export type RelayTicket = {
   maxBytes: number;
   createdAt: string;
   expiresAt: string;
+  uploader?: RelayUploader;
+  connectionId?: string;
+  debateId?: string;
+  dispatch?: RelayDispatch;
   uploadUrl?: string;
   downloadUrl?: string;
   methods?: string[];
@@ -517,8 +533,12 @@ export class DebatidorApiClient {
     });
   }
 
-  async getAssetTicket(ticketId: string): Promise<RelayTicket> {
-    return this.request<RelayTicket>(`/asset-relay/tickets/${encodeURIComponent(ticketId)}`);
+  /** `waitSeconds` (0..60) activa el long-poll del backend: resuelve al asentarse el ticket o al vencer. */
+  async getAssetTicket(ticketId: string, waitSeconds?: number): Promise<RelayTicket> {
+    const base = `/asset-relay/tickets/${encodeURIComponent(ticketId)}`;
+    const wait = Number(waitSeconds);
+    const query = Number.isSafeInteger(wait) && wait > 0 ? `?wait=${Math.min(wait, 60)}` : '';
+    return this.request<RelayTicket>(`${base}${query}`);
   }
 
   async cancelAssetTicket(ticketId: string): Promise<RelayTicket> {
