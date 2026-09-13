@@ -78,7 +78,6 @@ test('agent asset tool forwards URL metadata without proxying asset bytes', asyn
       sha256: 'a'.repeat(64),
       mimeType: 'image/webp',
       sourceType: 'url',
-      error: undefined,
     });
   });
 
