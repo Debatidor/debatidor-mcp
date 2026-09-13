@@ -6,10 +6,6 @@ import {
   type AgentExecutionInput,
   type AgentExecutionResult,
 } from './debatidor-api.js';
-import {
-  createDebatidorServerWithAssets,
-} from './agent-asset-tools.js';
-import type { DebatidorServerOptions } from './server.js';
 
 const UPLOAD_ID_RE = /^upl_[a-f0-9]{32}$/;
 const SHA_RE = /^[a-f0-9]{64}$/;
@@ -68,14 +64,6 @@ type ApiResult = AgentExecutionResult & {
   sourceType?: 'chunked';
   aborted?: boolean;
 };
-
-export function createDebatidorServerWithAssetFabric(
-  options: DebatidorServerOptions,
-): McpServer {
-  const server = createDebatidorServerWithAssets(options);
-  if (options.api) registerAgentUploadTools(server, options.api);
-  return server;
-}
 
 export function registerAgentUploadTools(server: McpServer, api: DebatidorApiClient): void {
   server.registerTool(
