@@ -6,6 +6,7 @@ import {
   type AgentExecutionInput,
   type AgentExecutionResult,
 } from './debatidor-api.js';
+import { registerAgentUploadTools } from './agent-upload-tools.js';
 import {
   createDebatidorServer,
   type DebatidorServerOptions,
@@ -85,16 +86,14 @@ type AssetExecutionResult = Omit<AgentExecutionResult, 'tool'> & {
   sourceType?: 'url' | 'base64';
 };
 
-/**
- * Production/server entrypoint with the generic asset transfer tool enabled.
- * Keeping this as a wrapper lets the existing server tool bundle remain
- * backwards-compatible while both HTTP and stdio get the new capability.
- */
 export function createDebatidorServerWithAssets(
   options: DebatidorServerOptions,
 ): McpServer {
   const server = createDebatidorServer(options);
-  if (options.api) registerAgentAssetTool(server, options.api);
+  if (options.api) {
+    registerAgentAssetTool(server, options.api);
+    registerAgentUploadTools(server, options.api);
+  }
   return server;
 }
 
@@ -129,9 +128,6 @@ export function registerAgentAssetTool(
           mimeType: input.mimeType,
           timeoutMs: input.timeoutMs,
         };
-        // DebatidorApiClient forwards agent execution payloads verbatim. The
-        // public AgentExecutionInput union remains backwards-compatible for
-        // existing consumers while this additive tool is introduced.
         const raw = await api.executeAgent(
           request as unknown as AgentExecutionInput,
         );
