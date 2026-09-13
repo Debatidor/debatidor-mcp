@@ -4,7 +4,6 @@ import {
   DebatidorApiClient,
   DebatidorApiError,
   type AgentExecutionInput,
-  type AgentExecutionResult,
 } from './debatidor-api.js';
 
 const UPLOAD_ID_RE = /^upl_[a-f0-9]{32}$/;
@@ -53,8 +52,12 @@ const uploadResultSchema = z.object({
   error: z.string().optional(),
 });
 
-type ApiResult = AgentExecutionResult & {
+type ApiResult = {
+  agentId?: string | null;
+  ok?: boolean;
   uploadId?: string;
+  path?: string;
+  bytes?: number;
   chunkSize?: number;
   received?: number;
   totalReceived?: number;
@@ -63,6 +66,7 @@ type ApiResult = AgentExecutionResult & {
   mimeType?: string;
   sourceType?: 'chunked';
   aborted?: boolean;
+  error?: string;
 };
 
 export function registerAgentUploadTools(server: McpServer, api: DebatidorApiClient): void {
@@ -128,7 +132,7 @@ async function executeUpload(
       ...input,
       tool,
     } as unknown as AgentExecutionInput);
-    const result = raw as ApiResult;
+    const result = raw as unknown as ApiResult;
     const safe = {
       tool,
       agentId: result.agentId ?? null,
@@ -156,7 +160,7 @@ async function executeUpload(
   }
 }
 
-function formatResult(tool: string, result: ApiResult & { agentId?: string | null }): string {
+function formatResult(tool: string, result: ApiResult): string {
   if (result.ok === false) return `${tool} failed: ${result.error ?? 'operation_failed'}`;
   if (tool === 'asset.begin') return `Upload ${result.uploadId} ready; chunkSize=${result.chunkSize ?? 0}.`;
   if (tool === 'asset.chunk') return `Upload ${result.uploadId}: received ${result.received ?? 0} bytes; nextIndex=${result.nextIndex ?? 0}.`;
