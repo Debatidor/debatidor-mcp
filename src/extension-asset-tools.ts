@@ -9,17 +9,26 @@ import {
 const SHA_RE = /^[a-f0-9]{64}$/;
 const MAX_TICKET_BYTES = 512 * 1024 * 1024;
 
-const pathField = z
+const destinationPathField = z
   .string()
   .trim()
   .min(1)
   .max(1000)
-  .describe('Relative destination path inside the connected debatidor-agent project root.');
+  .describe(
+    'Relative DESTINATION path inside the connected debatidor-agent project root. This names the saved VPS file and is never used to identify the source image in the browser DOM.',
+  );
+
+const sourceStrategyField = z
+  .enum(['previous-turn-image', 'wait-for-new-image'])
+  .describe(
+    'How the linked extension identifies the SOURCE image. previous-turn-image means the native ImageGen image in the assistant turn immediately before the user save request; wait-for-new-image means wait for the next native ImageGen image produced after the request.',
+  );
 
 const optionalId = z.string().trim().min(1).max(200).optional();
 
 const inputSchema = z.object({
-  path: pathField,
+  destinationPath: destinationPathField,
+  sourceStrategy: sourceStrategyField,
   agentId: optionalId.describe(
     'Optional debatidor-agent id. Omit to use the first connected agent for this user/workspace.',
   ),
@@ -42,7 +51,7 @@ const inputSchema = z.object({
     .toLowerCase()
     .regex(SHA_RE)
     .optional()
-    .describe('Expected SHA-256 of the source asset when known, for end-to-end integrity matching.'),
+    .describe('Expected SHA-256 of the source asset when known, for end-to-end integrity verification.'),
   mimeType: z
     .string()
     .trim()
@@ -69,6 +78,9 @@ const outputSchema = z.object({
   ticketId: z.string(),
   status: z.string(),
   agentId: z.string().nullable(),
+  destinationPath: z.string(),
+  sourceStrategy: sourceStrategyField,
+  // Compatibility aliases retained for ticket-status clients during rollout.
   path: z.string(),
   fileName: z.string(),
   expiresAt: z.string(),
@@ -87,11 +99,9 @@ type ExtensionSaveOutput = z.infer<typeof outputSchema>;
 /**
  * Narrow browser-extension rail for web chats.
  *
- * Unlike debatidor_asset_ticket, this tool cannot expose a relay URL, cannot
- * create download tickets and cannot target arbitrary external services. The
- * MCP call carries metadata only; the same-account Debatidor extension receives
- * the one-time upload URL over its authenticated WebSocket and performs the
- * browser-side transfer.
+ * Source identity and destination identity are deliberately separate. The
+ * source is selected by sourceStrategy in the linked browser DOM; the path is
+ * only the final agent-side filename. No browser URL or file bytes enter MCP.
  */
 export function registerExtensionAssetTools(
   server: McpServer,
@@ -102,25 +112,28 @@ export function registerExtensionAssetTools(
     {
       title: 'Save a web-chat asset through the linked Debatidor extension',
       description:
-        'Use when the user explicitly asks to persist an image, video or file that is already generated or attached in the current web chat. This is a metadata-only coordination call: it does NOT send file bytes, browser URLs, cookies or chat content through MCP, and it never returns a relay URL. Debatidor sends a same-account internal save request to the already-linked browser extension, which reads the visible asset in that tab and stores it in the user\'s connected agent project. Include expectedBytes and expectedSha256 when known so the extension/relay can match and verify the exact original. The destination path may be created or replaced.',
+        'Coordinate saving a native web-chat generated image without sending its bytes or browser URL through MCP. Set sourceStrategy=previous-turn-image when the user says to save THIS/already-generated image from the immediately previous assistant turn. Set sourceStrategy=wait-for-new-image when the same request asks ChatGPT to generate an image and then save it. destinationPath is only the final relative path in the connected agent project; it is never matched against the DOM. The extension resolves the native image, fetches its same-origin bytes, and uploads them over the Media Rail. Include expectedBytes/expectedSha256 only when reliably known.',
       inputSchema,
       outputSchema,
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
         idempotentHint: false,
-        // This action is confined to the user's linked Debatidor extension +
-        // connected agent. It does not expose or contact arbitrary third-party
-        // endpoints from the MCP call itself.
         openWorldHint: false,
       },
     },
     async (input: ExtensionSaveInput) => {
       try {
-        const ticket = await api.createAssetTicket({
-          direction: 'upload',
-          uploader: 'extension',
-          path: input.path,
+        // `path` remains a rollout alias for older backends. New backends also
+        // receive the explicit destinationPath/sourceStrategy pair. Because the
+        // object is assigned first, TypeScript permits the additive fields while
+        // DebatidorApiClient continues to transport the object verbatim.
+        const ticketInput = {
+          direction: 'upload' as const,
+          uploader: 'extension' as const,
+          path: input.destinationPath,
+          destinationPath: input.destinationPath,
+          sourceStrategy: input.sourceStrategy,
           agentId: input.agentId,
           connectionId: input.connectionId,
           debateId: input.debateId,
@@ -128,11 +141,12 @@ export function registerExtensionAssetTools(
           expectedSha256: input.expectedSha256,
           mimeType: input.mimeType,
           ttlSeconds: input.ttlSeconds,
-        });
-        const safe = compact(ticket);
+        };
+        const ticket = await api.createAssetTicket(ticketInput);
+        const safe = compact(ticket, input);
         const delivered = safe.dispatch?.delivered === true;
         const text = delivered
-          ? `Save request ${safe.ticketId} was delivered to the linked Debatidor extension for ${safe.fileName}. Call debatidor_asset_ticket_status with this ticketId and waitSeconds=60 to verify completion.`
+          ? `Save request ${safe.ticketId} was delivered to the linked Debatidor extension for ${safe.destinationPath} using ${safe.sourceStrategy}. Call debatidor_asset_ticket_status with this ticketId and waitSeconds=60 to verify completion.`
           : `Save request ${safe.ticketId} was created but not delivered to a linked extension${safe.dispatch?.reason ? ` (${safe.dispatch.reason})` : ''}. Keep the target web-chat tab open, enable Debatidor for that tab, then create a new save request.`;
         return {
           content: [{ type: 'text' as const, text }],
@@ -146,13 +160,16 @@ export function registerExtensionAssetTools(
   );
 }
 
-function compact(ticket: RelayTicket): ExtensionSaveOutput {
+function compact(ticket: RelayTicket, input: ExtensionSaveInput): ExtensionSaveOutput {
+  const destinationPath = input.destinationPath;
   return {
     ticketId: ticket.ticketId,
     status: ticket.status,
     agentId: ticket.agentId ?? null,
-    path: ticket.path,
-    fileName: basename(ticket.path),
+    destinationPath,
+    sourceStrategy: input.sourceStrategy,
+    path: ticket.path || destinationPath,
+    fileName: basename(destinationPath),
     expiresAt: ticket.expiresAt,
     maxBytes: ticket.maxBytes,
     expectedBytes: ticket.expectedBytes,
