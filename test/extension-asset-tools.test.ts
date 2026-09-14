@@ -32,7 +32,7 @@ async function withClient(api: DebatidorApiClient, run: (client: Client) => Prom
   }
 }
 
-test('debatidor_extension_save_asset is narrow, metadata-only and never exposes relay URL', async () => {
+test('debatidor_extension_save_asset separates sourceStrategy from destinationPath and never exposes relay URL', async () => {
   const calls: Array<{ url: string; method: string; body?: Record<string, unknown> }> = [];
   const upstream: typeof fetch = async (input, init) => {
     const url = String(input);
@@ -49,6 +49,8 @@ test('debatidor_extension_save_asset is narrow, metadata-only and never exposes 
           status: 'pending',
           agentId: body?.agentId ?? null,
           path: body?.path,
+          destinationPath: body?.destinationPath,
+          sourceStrategy: body?.sourceStrategy,
           expectedBytes: body?.expectedBytes,
           expectedSha256: body?.expectedSha256,
           mimeType: body?.mimeType,
@@ -81,11 +83,16 @@ test('debatidor_extension_save_asset is narrow, metadata-only and never exposes 
     assert.equal(tool.annotations?.openWorldHint, false);
     assert.equal(tool.annotations?.readOnlyHint, false);
     assert.equal(tool.annotations?.destructiveHint, true);
+    const required = (tool.inputSchema as { required?: string[] }).required ?? [];
+    assert.ok(required.includes('destinationPath'));
+    assert.ok(required.includes('sourceStrategy'));
+    assert.equal(required.includes('path'), false);
 
     const result = await client.callTool({
       name: 'debatidor_extension_save_asset',
       arguments: {
-        path: 'imagen_original.png',
+        destinationPath: 'imagen_original.png',
+        sourceStrategy: 'previous-turn-image',
         agentId: 'vps-workspace',
         connectionId: 'conn_dom_openai',
         expectedBytes: 2070019,
@@ -96,6 +103,8 @@ test('debatidor_extension_save_asset is narrow, metadata-only and never exposes 
     assert.notEqual(result.isError, true);
     const structured = result.structuredContent as Record<string, unknown>;
     assert.equal(structured.ticketId, 'tkt_0123456789abcdef01234567');
+    assert.equal(structured.destinationPath, 'imagen_original.png');
+    assert.equal(structured.sourceStrategy, 'previous-turn-image');
     assert.equal(structured.fileName, 'imagen_original.png');
     assert.equal(structured.path, 'imagen_original.png');
     assert.equal((structured.dispatch as Record<string, unknown>).delivered, true);
@@ -107,10 +116,31 @@ test('debatidor_extension_save_asset is narrow, metadata-only and never exposes 
     assert.equal(calls.length, 1);
     assert.equal(calls[0]?.body?.direction, 'upload');
     assert.equal(calls[0]?.body?.uploader, 'extension');
+    // path is only a rollout alias; destinationPath is the semantic field.
     assert.equal(calls[0]?.body?.path, 'imagen_original.png');
+    assert.equal(calls[0]?.body?.destinationPath, 'imagen_original.png');
+    assert.equal(calls[0]?.body?.sourceStrategy, 'previous-turn-image');
     assert.equal(calls[0]?.body?.agentId, 'vps-workspace');
     assert.equal(calls[0]?.body?.connectionId, 'conn_dom_openai');
     assert.equal(calls[0]?.body?.expectedBytes, 2070019);
     assert.equal(calls[0]?.body?.expectedSha256, SHA);
+  });
+});
+
+test('sourceStrategy rejects values outside the two DOM semantics', async () => {
+  const api = new DebatidorApiClient(
+    'https://api.test',
+    { type: 'api-key', token: 'test' },
+    async () => json({ message: 'should_not_call_upstream' }, 500),
+  );
+  await withClient(api, async (client) => {
+    const result = await client.callTool({
+      name: 'debatidor_extension_save_asset',
+      arguments: {
+        destinationPath: 'x.png',
+        sourceStrategy: 'latest-image',
+      },
+    });
+    assert.equal(result.isError, true);
   });
 });
