@@ -4,7 +4,8 @@ import { createMcpHandler } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { isAllowedHost, loadConfig } from './config.js';
 import { DebatidorApiClient } from './debatidor-api.js';
-import { createDebatidorServer, SERVER_VERSION } from './server.js';
+import { SERVER_VERSION } from './server.js';
+import { createDebatidorServerWithAssets } from './agent-asset-tools.js';
 
 const config = loadConfig();
 const legacyApi =
@@ -82,7 +83,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
   }
 
   const handler = createMcpHandler(() =>
-    createDebatidorServer({ api, publicBaseUrl: config.publicBaseUrl }),
+    createDebatidorServerWithAssets({ api, publicBaseUrl: config.publicBaseUrl }),
   );
   const nodeHandler = toNodeHandler(handler);
   try {

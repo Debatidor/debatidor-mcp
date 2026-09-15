@@ -2,7 +2,7 @@
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { loadConfig } from './config.js';
 import { DebatidorApiClient } from './debatidor-api.js';
-import { createDebatidorServer } from './server.js';
+import { createDebatidorServerWithAssets } from './agent-asset-tools.js';
 
 const config = loadConfig();
 const api =
@@ -13,4 +13,6 @@ const api =
       })
     : undefined;
 
-void serveStdio(() => createDebatidorServer({ api, publicBaseUrl: config.publicBaseUrl }));
+void serveStdio(() =>
+  createDebatidorServerWithAssets({ api, publicBaseUrl: config.publicBaseUrl }),
+);
