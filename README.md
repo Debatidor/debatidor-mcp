@@ -30,7 +30,7 @@ El endpoint remoto es el camino de producto. `stdio` se conserva para clientes l
 
 ## Estado actual
 
-Versión `0.8.0`:
+Versión `0.8.2`:
 
 - MCP TypeScript SDK v2, revisión objetivo `2026-07-28`;
 - Streamable HTTP stateless en `/mcp`;
@@ -243,6 +243,46 @@ Las búsquedas, lecturas y exportaciones preservan `provenance.origins?: [{rawTy
 `knowledge` en status conserva conteos y bytes raw, mensajes pendientes de preparar para conocimiento (`raw.pendingMessageHydration`), resúmenes vigentes/obsoletos/olvidados y cola pendiente/en ejecución/fallida, con antigüedad y p95 de finalización. El historial de trabajos completados se conserva siete días; esos contadores no representan toda la vida del producto. Un backend anterior sin `knowledge` no se interpreta como cero.
 
 La suite cubre contratos y transporte HTTP MCP con una Context API HTTP simulada, incluidos permisos denegados, reintentos explícitos, respuestas malformadas y revocación entre lecturas. No representa una nueva validación de ChatGPT o Claude ni una prueba Nest/PostgreSQL; esas pruebas pertenecen al backend.
+
+### Context Graph: accesos dirigidos entre sesiones
+
+Las tres herramientas de gestión usan la identidad OAuth habitual del usuario y su
+workspace actual. Ambas sesiones privadas deben pertenecerle. El acceso va de la
+sesión lectora a la fuente seleccionada; no concede permisos inversos ni transitivos.
+
+| Herramienta | Entrada y efecto |
+| --- | --- |
+| `debatidor_create_context_edge` | `readerSessionId`, `sourceSessionId`, `clientEdgeId` y `views` explícitas: `summary`, `recent`, `transcript`. La lectora debe estar abierta. |
+| `debatidor_list_context_edges` | Una página de metadatos para `readerSessionId`; `limit` predeterminado 50, máximo 100. Devuelve `nextCursor` para continuar con la misma lectora, e incluye aristas expiradas y revocadas. |
+| `debatidor_revoke_context_edge` | Revocación explícita e idempotente de `edgeId` en `readerSessionId`. Conserva el historial raw y las demás aristas. |
+
+La creación admite `maxEvents` de 1 a 50 (predeterminado 50), que limita los
+registros por página delegada y las posiciones de la ventana reciente. Admite
+`ttlSeconds` de 1 a 86400 (predeterminado 3600). El cliente comprueba que la
+respuesta conserve lectora, fuente, vistas, límite y duración solicitados; no
+interpreta una respuesta incompatible como una concesión correcta. El límite del
+backend es de 100 aristas sin revocar por lectora.
+
+Una repetición explícita con el mismo `clientEdgeId` y parámetros devuelve la
+arista original y `duplicate: true`, con su caducidad original. Cambiar el ID de
+reintento o reemplazar parámetros no es una recuperación automática válida. Para
+cambiar vistas, fuente o límites, revoca la arista y crea otra expresamente; una
+arista expirada también debe revocarse antes de reemplazar el par lectora/fuente.
+No se reintentan automáticamente las mutaciones, incluso cuando el resultado de
+la conexión es incierto.
+
+Estas herramientas gestionan permisos y devuelven exclusivamente sus metadatos.
+No emiten credenciales delegadas, no devuelven tokens o hashes, no leen por cuenta
+de una sesión delegada y no arrancan agentes. Las credenciales `dctx1_` pertenecen
+al canal dedicado del backend y no sustituyen el OAuth del MCP. Los campos de
+identidad, workspace o credenciales adicionales se rechazan. Revocar impide
+lecturas futuras; no retira texto que ya haya recibido un modelo.
+
+Requiere el backend de Context Graph con
+`/context/sessions/:readerId/edges`. Las pruebas locales cubren contratos,
+descripciones, errores y transporte HTTP MCP/API con un backend sintético. La
+autorización real y el uso por dos harnesses pertenecen a sus verificaciones
+integradas; estas pruebas del adaptador no acreditan por sí solas esos gates.
 
 ### `debatidor_quick_debate`
 
