@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
 import {
+  createContextEdgeInputSchema, listContextEdgesInputSchema, revokeContextEdgeInputSchema,
+  contextEdgeCreatedSchema, contextEdgesSchema, contextEdgeRevokedSchema, decodeContextEdgeCursor,
+  type CreateContextEdgeInput, type ListContextEdgesInput, type RevokeContextEdgeInput,
+} from './context-graph-contracts.js';
+import {
   canonicalContextSearchSchema,
   contextIndexSchema,
   type ContextKind,
@@ -427,6 +432,36 @@ export class DebatidorApiClient {
 
   async getContextStatus() {
     return parseContext(contextStatusSchema, await this.request('/context/status', { expectedStatus: 200 }));
+  }
+
+  async createContextEdge(input: CreateContextEdgeInput) {
+    const { readerSessionId, ...body } = createContextEdgeInputSchema.parse(input);
+    const response = await this.requestWithStatus(`/context/sessions/${encodeURIComponent(readerSessionId)}/edges`, {method:'POST', body});
+    const result = parseContext(contextEdgeCreatedSchema, response.data);
+    if (response.status !== (result.duplicate ? 200 : 201) || result.readerSessionId !== readerSessionId ||
+        result.sourceSessionId !== body.sourceSessionId || result.maxEvents !== (body.maxEvents ?? 50) ||
+        result.views.length !== body.views.length || result.views.some(view => !body.views.includes(view)) ||
+        Date.parse(result.expiresAt) - Date.parse(result.createdAt) !== (body.ttlSeconds ?? 3600) * 1000 ||
+        (!result.duplicate && result.revokedAt !== null)) throw invalidContextResponse();
+    return result;
+  }
+
+  async listContextEdges(input: ListContextEdgesInput) {
+    input = listContextEdgesInputSchema.parse(input);
+    const query = new URLSearchParams();
+    if (input.cursor !== undefined) query.set('cursor', input.cursor);
+    if (input.limit !== undefined) query.set('limit', String(input.limit));
+    const result = parseContext(contextEdgesSchema, await this.request(`/context/sessions/${encodeURIComponent(input.readerSessionId)}/edges${query.size ? `?${query}` : ''}`, {expectedStatus:200}));
+    const next = result.nextCursor === null ? null : decodeContextEdgeCursor(result.nextCursor);
+    const previous = input.cursor === undefined ? null : decodeContextEdgeCursor(input.cursor);
+    if (result.edges.length > (input.limit ?? 50) || result.edges.some(edge => edge.readerSessionId !== input.readerSessionId || edge.id === previous?.after) ||
+        (result.nextCursor !== null && (result.nextCursor === input.cursor || next?.readerId !== input.readerSessionId || next?.after !== result.edges.at(-1)?.id))) throw invalidContextResponse();
+    return result;
+  }
+
+  async revokeContextEdge(input: RevokeContextEdgeInput) {
+    input = revokeContextEdgeInputSchema.parse(input);
+    return parseContext(contextEdgeRevokedSchema, await this.request(`/context/sessions/${encodeURIComponent(input.readerSessionId)}/edges/${encodeURIComponent(input.edgeId)}`, {method:'DELETE', expectedStatus:200}));
   }
 
   async executeAgent(input: AgentExecutionInput): Promise<AgentExecutionResult> {

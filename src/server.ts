@@ -13,9 +13,10 @@ import { contextSearchSchema, contextIndexSchema } from './context-contracts.js'
 import { registerContextGovernanceTools } from './context-governance-tools.js';
 import { registerContextProjectTools } from './context-project-tools.js';
 import { registerContextKnowledgeTools } from './context-knowledge-tools.js';
+import { registerContextGraphTools } from './context-graph-tools.js';
 import { contextSearchInputSchema } from './context-knowledge-contracts.js';
 
-export const SERVER_VERSION = '0.7.7';
+export const SERVER_VERSION = '0.7.8';
 export const PROTOCOL_VERSION = '2026-07-28';
 
 export type DebatidorServerOptions = {
@@ -130,6 +131,7 @@ export function createDebatidorServer(options: DebatidorServerOptions): McpServe
     registerContextGovernanceTools(server, options.api, safeContextError);
     registerContextProjectTools(server, options.api, safeContextError);
     registerContextKnowledgeTools(server, options.api, safeContextError);
+    registerContextGraphTools(server, options.api, safeContextError);
     registerQuickDebateTool(server, options.api);
     registerAgentTools(server, options.api);
   }
@@ -560,6 +562,17 @@ function safeContextError(error: unknown) {
       context_source_not_found: 'That memory source is unavailable in your authorized scope.',
       context_project_not_found: 'That private memory project is unavailable to the authenticated account in this workspace.',
       context_session_not_found: 'That private raw session is unavailable to the authenticated account.',
+      context_graph_session_not_found: 'That private context session is unavailable to the authenticated account in its current workspace.',
+      context_graph_edge_not_found: 'That directed context grant is unavailable for the requested reader session.',
+      context_graph_edge_id_conflict: 'That clientEdgeId identifies a different directed grant request. Do not change the identifier or retry automatically.',
+      context_graph_edge_exists: 'An unrevoked grant already exists for this reader/source pair. Explicitly revoke it before creating a replacement, even when it has expired.',
+      context_graph_reader_closed: 'That reader session is closed and cannot receive a new directed context grant.',
+      context_graph_edge_quota: 'The reader session has reached its limit of 100 unrevoked context grants. Explicitly revoke an unneeded grant before creating another.',
+      context_graph_cursor_invalid: 'Use the unchanged nextCursor from the edge list for this same reader session.',
+      context_graph_self_edge: 'A directed context grant requires two distinct sessions.',
+      context_graph_view_invalid: 'Select 1–3 unique views: summary, recent or transcript.',
+      context_graph_limit_invalid: 'Use a maxEvents limit from 1 to 50 and a ttlSeconds lifetime from 1 to 86400.',
+      context_principal_unavailable: 'The requested context scope is unavailable to this account in its current workspace.',
       context_session_closed: 'That raw session is closed and no longer accepts new events. Its history is preserved.',
       context_session_id_conflict: 'That clientSessionId already identifies a different session creation request. Do not silently generate a new identifier or retry.',
       context_event_id_conflict: 'That clientEventId already identifies different content or role. Read the original event before any explicitly requested correction.',
